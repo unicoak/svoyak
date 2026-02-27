@@ -21,6 +21,24 @@ export class QuizRepository {
     return result.rows[0] ?? null;
   }
 
+  async getLatestPublishedPackage(): Promise<QuizPackageSummary | null> {
+    const result = await this.pool.query<QuizPackageSummary>(
+      `
+        SELECT
+          id,
+          title,
+          language_code AS "languageCode",
+          is_published AS "isPublished"
+        FROM quiz_packages
+        WHERE is_published = TRUE
+        ORDER BY updated_at DESC, created_at DESC
+        LIMIT 1
+      `,
+    );
+
+    return result.rows[0] ?? null;
+  }
+
   async listQuestionsByPackage(packageId: string): Promise<QuizQuestionRow[]> {
     const result = await this.pool.query<QuizQuestionRow>(
       `

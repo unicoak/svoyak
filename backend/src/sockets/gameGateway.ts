@@ -163,13 +163,23 @@ export class GameGateway {
       const payload = parsed.data;
       socket.data.displayName = payload.displayName;
 
-      const quizPackage = await this.quizRepository.getPackageById(payload.packageId);
-      if (!quizPackage) {
-        ack?.(failure("PACKAGE_NOT_FOUND", "Quiz package does not exist."));
-        return;
+      let resolvedPackageId = payload.packageId;
+      let resolvedPackage = await this.quizRepository.getPackageById(payload.packageId);
+      let usedFallbackPackage = false;
+
+      if (!resolvedPackage) {
+        const fallbackPackage = await this.quizRepository.getLatestPublishedPackage();
+        if (!fallbackPackage) {
+          ack?.(failure("PACKAGE_NOT_FOUND", "Quiz package does not exist."));
+          return;
+        }
+
+        resolvedPackageId = fallbackPackage.id;
+        resolvedPackage = fallbackPackage;
+        usedFallbackPackage = true;
       }
 
-      const questions = await this.quizRepository.listQuestionsByPackage(payload.packageId);
+      const questions = await this.quizRepository.listQuestionsByPackage(resolvedPackageId);
       if (questions.length === 0) {
         ack?.(failure("EMPTY_PACKAGE", "Selected package has no questions."));
         return;
@@ -185,7 +195,7 @@ export class GameGateway {
         hostUserId: socket.data.userId,
         hostName: payload.displayName,
         hostSocketId: socket.id,
-        packageId: payload.packageId,
+        packageId: resolvedPackageId,
         nowMs,
         settings: mergeRoomSettings(this.settingsDefaults, payload.settings),
         questionIds: questions.map((question) => question.id),
@@ -209,7 +219,17 @@ export class GameGateway {
       });
 
       this.emitRoomState(room);
-      ack?.(ok({ roomCode: room.code, roomId: room.roomId, reconnectToken }));
+      ack?.(
+        ok({
+          roomCode: room.code,
+          roomId: room.roomId,
+          reconnectToken,
+          packageId: resolvedPackageId,
+          requestedPackageId: payload.packageId,
+          packageFallbackUsed: usedFallbackPackage,
+          packageTitle: resolvedPackage.title,
+        }),
+      );
     });
 
     socket.on("join_room", async (rawPayload: unknown, ack?: (response: Ack) => void) => {
