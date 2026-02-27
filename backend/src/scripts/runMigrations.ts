@@ -1,8 +1,8 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { Pool } from "pg";
-import { env } from "../config/env.js";
+import type { Pool } from "pg";
+import { createPgPool } from "../db/pg.js";
 
 const MIGRATIONS_TABLE = "schema_migrations";
 
@@ -108,7 +108,7 @@ const applyMigration = async (
 
 const run = async (): Promise<void> => {
   const withSeed = shouldIncludeSeedMigrations();
-  const pool = new Pool({ connectionString: env.pgConnectionString });
+  const pool = createPgPool();
 
   try {
     await ensureMigrationsTable(pool);

@@ -82,6 +82,7 @@ flutter run --dart-define=BACKEND_URL=http://localhost:3000
 3. Set backend environment variables:
    - `NODE_ENV=production`
    - `PG_CONNECTION_STRING=<timeweb_postgres_connection_string>`
+   - `PG_SSL_REJECT_UNAUTHORIZED=false` (for self-signed certificate chain errors)
    - `REDIS_URL=<timeweb_redis_url>`
    - Optional for staging demo data: `MIGRATE_WITH_SEED=true`
 4. Attach domain and HTTPS to backend app.
