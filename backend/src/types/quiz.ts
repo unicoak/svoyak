@@ -7,6 +7,12 @@ export interface QuizPackageSummary {
   isPublished: boolean;
 }
 
+export interface QuizPackageCatalogItem extends QuizPackageSummary {
+  authorName: string;
+  difficulty: number;
+  questionsCount: number;
+}
+
 export interface QuizQuestionRow extends QuestionSnapshot {}
 
 export interface AcceptedAnswerRow extends AcceptedAnswer {}

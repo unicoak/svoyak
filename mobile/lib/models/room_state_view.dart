@@ -5,6 +5,7 @@ class PlayerView {
     required this.score,
     required this.connected,
     required this.isHost,
+    required this.canBuzz,
   });
 
   final String userId;
@@ -12,6 +13,7 @@ class PlayerView {
   final int score;
   final bool connected;
   final bool isHost;
+  final bool canBuzz;
 
   factory PlayerView.fromMap(Map<String, dynamic> raw) {
     return PlayerView(
@@ -20,6 +22,7 @@ class PlayerView {
       score: (raw['score'] as num?)?.toInt() ?? 0,
       connected: raw['connected'] as bool? ?? false,
       isHost: raw['isHost'] as bool? ?? false,
+      canBuzz: raw['canBuzz'] as bool? ?? false,
     );
   }
 }
@@ -27,18 +30,30 @@ class PlayerView {
 class QuestionView {
   QuestionView({
     required this.id,
+    required this.roundNo,
+    required this.boardRow,
+    required this.boardCol,
     required this.prompt,
+    required this.answerDisplay,
     required this.points,
   });
 
   final String id;
+  final int roundNo;
+  final int boardRow;
+  final int boardCol;
   final String prompt;
+  final String answerDisplay;
   final int points;
 
   factory QuestionView.fromMap(Map<String, dynamic> raw) {
     return QuestionView(
       id: raw['id']?.toString() ?? '',
+      roundNo: (raw['roundNo'] as num?)?.toInt() ?? 1,
+      boardRow: (raw['boardRow'] as num?)?.toInt() ?? 0,
+      boardCol: (raw['boardCol'] as num?)?.toInt() ?? 0,
       prompt: raw['prompt']?.toString() ?? '',
+      answerDisplay: raw['answerDisplay']?.toString() ?? '',
       points: (raw['points'] as num?)?.toInt() ?? 0,
     );
   }
@@ -55,6 +70,12 @@ class RoomStateView {
     required this.playedQuestionIds,
     this.currentQuestion,
     this.activeAnswerUserId,
+    this.readStartedAtServerMs,
+    this.readEndsAtServerMs,
+    this.buzzOpenAtServerMs,
+    this.buzzCloseAtServerMs,
+    this.buzzWindowMs = 5000,
+    this.allowFalseStarts = true,
   });
 
   final int version;
@@ -66,6 +87,12 @@ class RoomStateView {
   final List<String> playedQuestionIds;
   final QuestionView? currentQuestion;
   final String? activeAnswerUserId;
+  final int? readStartedAtServerMs;
+  final int? readEndsAtServerMs;
+  final int? buzzOpenAtServerMs;
+  final int? buzzCloseAtServerMs;
+  final int buzzWindowMs;
+  final bool allowFalseStarts;
 
   bool get isQuestionOpen => status == 'QUESTION_OPEN' || status == 'ANSWERING';
 
@@ -99,6 +126,8 @@ class RoomStateView {
 
     final game = _asMap(state['game']);
     final board = _asMap(game['board']);
+    final settings = _asMap(state['settings']);
+    final buzzer = _asMap(game['buzzer']);
     final currentQuestionRaw = game['currentQuestion'];
     final currentQuestion = currentQuestionRaw == null
         ? null
@@ -118,6 +147,12 @@ class RoomStateView {
       playedQuestionIds: _asStringList(board['playedQuestionIds']),
       currentQuestion: currentQuestion,
       activeAnswerUserId: answering['activeUserId']?.toString(),
+      readStartedAtServerMs: (buzzer['readStartedAtServerMs'] as num?)?.toInt(),
+      readEndsAtServerMs: (buzzer['readEndsAtServerMs'] as num?)?.toInt(),
+      buzzOpenAtServerMs: (buzzer['openAtServerMs'] as num?)?.toInt(),
+      buzzCloseAtServerMs: (buzzer['closeAtServerMs'] as num?)?.toInt(),
+      buzzWindowMs: (settings['buzzWindowMs'] as num?)?.toInt() ?? 5000,
+      allowFalseStarts: settings['allowFalseStarts'] as bool? ?? true,
     );
   }
 }

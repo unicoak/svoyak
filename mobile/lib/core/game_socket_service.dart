@@ -4,6 +4,19 @@ import 'package:socket_io_client/socket_io_client.dart' as io;
 
 import '../models/socket_event.dart';
 
+class SocketAckException implements Exception {
+  SocketAckException({
+    required this.code,
+    required this.message,
+  });
+
+  final String code;
+  final String message;
+
+  @override
+  String toString() => 'SocketAckException($code): $message';
+}
+
 class GameSocketService {
   GameSocketService(this.serverUrl);
 
@@ -88,17 +101,33 @@ class GameSocketService {
     required String packageId,
     required String displayName,
     required String visibility,
+    required bool allowFalseStarts,
   }) {
     return _emitWithAck('create_room', <String, dynamic>{
       'packageId': packageId,
       'displayName': displayName,
       'visibility': visibility,
+      'settings': <String, dynamic>{
+        'allowFalseStarts': allowFalseStarts,
+      },
     });
   }
 
   Future<Map<String, dynamic>> listPublicRooms({int limit = 20}) {
     return _emitWithAck('list_public_rooms', <String, dynamic>{
       'limit': limit,
+    });
+  }
+
+  Future<Map<String, dynamic>> listPackages({
+    String? query,
+    int? difficulty,
+    int limit = 20,
+  }) {
+    return _emitWithAck('list_packages', <String, dynamic>{
+      'limit': limit,
+      if (query != null && query.trim().isNotEmpty) 'query': query.trim(),
+      if (difficulty != null) 'difficulty': difficulty,
     });
   }
 
@@ -169,6 +198,30 @@ class GameSocketService {
     });
   }
 
+  Future<Map<String, dynamic>> syncTimeMetrics({
+    required String roomCode,
+    required int offsetMs,
+    required int rttMs,
+    String? sampleId,
+  }) {
+    return _emitWithAck('sync_time_metrics', <String, dynamic>{
+      'roomCode': roomCode,
+      'offsetMs': offsetMs,
+      'rttMs': rttMs,
+      if (sampleId != null && sampleId.isNotEmpty) 'sampleId': sampleId,
+    });
+  }
+
+  Future<Map<String, dynamic>> heartbeat({
+    required String roomCode,
+    required int clientNowMs,
+  }) {
+    return _emitWithAck('heartbeat', <String, dynamic>{
+      'roomCode': roomCode,
+      'clientNowMs': clientNowMs,
+    });
+  }
+
   Future<Map<String, dynamic>> leaveRoom(String roomCode) {
     return _emitWithAck('leave_room', <String, dynamic>{'roomCode': roomCode});
   }
@@ -192,12 +245,14 @@ class GameSocketService {
       },
     );
 
-    final response =
-        await completer.future.timeout(const Duration(seconds: 8));
+    final response = await completer.future.timeout(const Duration(seconds: 8));
 
     if (response['ok'] != true) {
       final error = _asMap(response['error']);
-      throw StateError(error['message']?.toString() ?? 'Unknown socket error');
+      throw SocketAckException(
+        code: error['code']?.toString() ?? 'UNKNOWN',
+        message: error['message']?.toString() ?? 'Unknown socket error',
+      );
     }
 
     return _asMap(response['data']);

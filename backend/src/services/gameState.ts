@@ -2,6 +2,10 @@ import { QuestionSnapshot, RoomState } from "../types/room.js";
 
 export const resetBuzzerState = (room: RoomState, state: "CLOSED" | "OPEN" | "LOCKED"): void => {
   room.game.buzzer.state = state;
+  room.game.buzzer.readStartedAtServerMs = null;
+  room.game.buzzer.readEndsAtServerMs = null;
+  room.game.buzzer.openAtServerMs = null;
+  room.game.buzzer.closeAtServerMs = null;
   room.game.buzzer.openedAtServerMs = state === "OPEN" ? Date.now() : null;
   room.game.buzzer.resolveAtServerMs = null;
   room.game.buzzer.winnerUserId = null;
@@ -23,7 +27,7 @@ export const openQuestion = (room: RoomState, question: QuestionSnapshot): void 
   }
 
   room.game.buzzer.lockedOutUserIds = [];
-  resetBuzzerState(room, "OPEN");
+  resetBuzzerState(room, "CLOSED");
 };
 
 export const lockBuzzerWinner = (room: RoomState, winnerUserId: string): void => {
@@ -38,8 +42,14 @@ export const lockBuzzerWinner = (room: RoomState, winnerUserId: string): void =>
 
 export type WrongAnswerOutcome = "REOPENED" | "CLOSED";
 
-export const markWrongAnswer = (room: RoomState, userId: string): WrongAnswerOutcome => {
-  room.game.buzzer.lockedOutUserIds.push(userId);
+export const markWrongAnswer = (
+  room: RoomState,
+  userId: string,
+  options?: { reopenWindowMs?: number },
+): WrongAnswerOutcome => {
+  if (!room.game.buzzer.lockedOutUserIds.includes(userId)) {
+    room.game.buzzer.lockedOutUserIds.push(userId);
+  }
   room.game.answering.activeUserId = null;
   room.game.answering.deadlineServerMs = null;
 
@@ -52,6 +62,10 @@ export const markWrongAnswer = (room: RoomState, userId: string): WrongAnswerOut
 
   room.status = eligible ? "QUESTION_OPEN" : "QUESTION_CLOSED";
   room.game.buzzer.state = eligible ? "OPEN" : "CLOSED";
+  room.game.buzzer.readStartedAtServerMs = null;
+  room.game.buzzer.readEndsAtServerMs = eligible ? Date.now() : null;
+  room.game.buzzer.openAtServerMs = eligible ? Date.now() : null;
+  room.game.buzzer.closeAtServerMs = eligible ? Date.now() + (options?.reopenWindowMs ?? 5_000) : null;
   room.game.buzzer.winnerUserId = null;
   room.game.buzzer.resolveAtServerMs = null;
   room.game.buzzer.attempts = [];
@@ -67,6 +81,10 @@ export const closeQuestion = (room: RoomState): void => {
 
   room.status = "QUESTION_CLOSED";
   room.game.buzzer.state = "CLOSED";
+  room.game.buzzer.readStartedAtServerMs = null;
+  room.game.buzzer.readEndsAtServerMs = null;
+  room.game.buzzer.openAtServerMs = null;
+  room.game.buzzer.closeAtServerMs = null;
   room.game.buzzer.openedAtServerMs = null;
   room.game.buzzer.resolveAtServerMs = null;
   room.game.buzzer.winnerUserId = null;

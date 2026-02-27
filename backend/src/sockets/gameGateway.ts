@@ -22,6 +22,7 @@ import { evaluateAnswer } from "../services/answerChecker.js";
 import { QuizRepository } from "../services/quizRepository.js";
 import { computeEffectivePressMs, updateJitter } from "../services/timeSync.js";
 import { Ack, AckError, AckOk } from "../types/events.js";
+import { QuizQuestionRow } from "../types/quiz.js";
 import { PublicRoomSummary, RoomState } from "../types/room.js";
 import { logger } from "../utils/logger.js";
 import { randomRoomCode, randomToken } from "../utils/ids.js";
@@ -44,6 +45,7 @@ const createRoomSchema = z.object({
       disconnectGraceMs: z.number().int().min(5_000).max(120_000).optional(),
       buzzResolveWindowMs: z.number().int().min(30).max(400).optional(),
       defaultAnswerTimeLimitMs: z.number().int().min(1_000).max(60_000).optional(),
+      allowFalseStarts: z.boolean().optional(),
     })
     .optional(),
 });
@@ -81,6 +83,12 @@ const syncTimeSchema = z.object({
   t0ClientMs: z.number().int().positive(),
 });
 
+const syncTimeMetricsSchema = roomCodeSchema.extend({
+  offsetMs: z.number().int().min(-5_000).max(5_000),
+  rttMs: z.number().int().min(1).max(5_000),
+  sampleId: z.string().min(1).max(64).optional(),
+});
+
 const heartbeatSchema = roomCodeSchema.extend({
   clientNowMs: z.number().int().positive(),
 });
@@ -88,6 +96,14 @@ const heartbeatSchema = roomCodeSchema.extend({
 const listPublicRoomsSchema = z
   .object({
     limit: z.number().int().min(1).max(100).optional(),
+  })
+  .optional();
+
+const listPackagesSchema = z
+  .object({
+    query: z.string().trim().max(80).optional(),
+    difficulty: z.number().int().min(1).max(3).optional(),
+    limit: z.number().int().min(1).max(50).optional(),
   })
   .optional();
 
@@ -103,8 +119,21 @@ interface FinalizeOutcome {
   questionId: string;
 }
 
+interface PackageStructureValidation {
+  valid: boolean;
+  reason?: string;
+  orderedQuestionIds?: string[];
+}
+
+const QUESTION_REVEAL_MIN_MS = 1_800;
+const QUESTION_REVEAL_MAX_MS = 9_000;
+const QUESTION_REVEAL_PER_CHAR_MS = 34;
+const EARLY_PRESS_TOLERANCE_MS = 35;
+
 export class GameGateway {
   private readonly buzzerTimers = new Map<string, NodeJS.Timeout>();
+  private readonly questionWindowTimers = new Map<string, NodeJS.Timeout>();
+  private readonly answerTimers = new Map<string, NodeJS.Timeout>();
   private readonly disconnectTimers = new Map<string, NodeJS.Timeout>();
   private readonly settingsDefaults = defaultRoomSettings({
     buzzResolveWindowMs: env.buzzResolveWindowMs,
@@ -153,6 +182,26 @@ export class GameGateway {
       }
     });
 
+    socket.on("list_packages", async (rawPayload: unknown, ack?: (response: Ack) => void) => {
+      const parsed = listPackagesSchema.safeParse(rawPayload);
+      if (!parsed.success) {
+        ack?.(failure("INVALID_PAYLOAD", "Invalid list_packages payload."));
+        return;
+      }
+
+      try {
+        const packages = await this.quizRepository.listPublishedPackages({
+          query: parsed.data?.query,
+          difficulty: parsed.data?.difficulty,
+          limit: parsed.data?.limit ?? 20,
+        });
+        ack?.(ok({ packages }));
+      } catch (error) {
+        logger.error("list_packages failed", error);
+        ack?.(failure("LIST_PACKAGES_FAILED", "Unable to load quiz packages."));
+      }
+    });
+
     socket.on("create_room", async (rawPayload: unknown, ack?: (response: Ack) => void) => {
       const parsed = createRoomSchema.safeParse(rawPayload);
       if (!parsed.success) {
@@ -185,6 +234,18 @@ export class GameGateway {
         return;
       }
 
+      const structure = this.validatePackageStructure(questions);
+      if (!structure.valid || !structure.orderedQuestionIds) {
+        ack?.(
+          failure(
+            "INVALID_PACKAGE_STRUCTURE",
+            structure.reason ??
+              "Package must contain 4-8 themes with 5 sequential questions in each theme.",
+          ),
+        );
+        return;
+      }
+
       const roomCode = await this.generateUniqueRoomCode();
       const nowMs = Date.now();
 
@@ -198,7 +259,7 @@ export class GameGateway {
         packageId: resolvedPackageId,
         nowMs,
         settings: mergeRoomSettings(this.settingsDefaults, payload.settings),
-        questionIds: questions.map((question) => question.id),
+        questionIds: structure.orderedQuestionIds,
       });
 
       await this.roomStore.save(room);
@@ -365,6 +426,24 @@ export class GameGateway {
             throw new Error("PLAYER_NOT_IN_ROOM");
           }
 
+          let clearAnswerTimer = false;
+          const currentQuestion = room.game.currentQuestion;
+          if (
+            currentQuestion &&
+            room.status === "ANSWERING" &&
+            room.game.answering.activeUserId === player.userId
+          ) {
+            clearAnswerTimer = true;
+            applyScoreDelta(room, player.userId, -currentQuestion.points);
+            const wrongOutcome = markWrongAnswer(room, player.userId, {
+              reopenWindowMs: room.settings.buzzWindowMs ?? 5_000,
+            });
+            if (wrongOutcome === "CLOSED") {
+              closeQuestion(room);
+              completeIfBoardFinished(room);
+            }
+          }
+
           delete room.players[socket.data.userId];
           const migration = migrateHostIfNeeded(room);
 
@@ -372,13 +451,30 @@ export class GameGateway {
             room,
             migration,
             roomEmpty: Object.keys(room.players).length === 0,
+            clearAnswerTimer,
+            buzzReopened:
+              room.status === "QUESTION_OPEN" &&
+              room.game.buzzer.state === "OPEN" &&
+              room.game.buzzer.closeAtServerMs != null,
           };
         });
 
         socket.leave(payload.roomCode);
         socket.data.roomCode = null;
 
+        if (outcome.clearAnswerTimer) {
+          this.clearAnswerDeadlineTimer(payload.roomCode);
+        }
+
+        if (outcome.buzzReopened && outcome.room.game.buzzer.closeAtServerMs) {
+          this.scheduleQuestionWindowClose(payload.roomCode, outcome.room.game.buzzer.closeAtServerMs);
+        } else if (outcome.room.status === "QUESTION_CLOSED" || outcome.room.status === "FINISHED") {
+          this.clearQuestionWindowTimer(payload.roomCode);
+          this.clearBuzzerFinalizationTimer(payload.roomCode);
+        }
+
         if (outcome.roomEmpty) {
+          this.clearRoomTimers(payload.roomCode);
           await this.roomStore.deleteByCode(payload.roomCode);
           ack?.(ok({ removed: true }));
           return;
@@ -421,6 +517,55 @@ export class GameGateway {
       });
 
       ack?.(ok({ t1ServerRecvMs, t2ServerSendMs }));
+    });
+
+    socket.on("sync_time_metrics", async (rawPayload: unknown, ack?: (response: Ack) => void) => {
+      const parsed = syncTimeMetricsSchema.safeParse(rawPayload);
+      if (!parsed.success) {
+        ack?.(failure("INVALID_PAYLOAD", "Invalid sync_time_metrics payload."));
+        return;
+      }
+
+      try {
+        await this.roomStore.withRoomLock(parsed.data.roomCode, async (room) => {
+          const player = room.players[socket.data.userId];
+          if (!player) {
+            throw new Error("PLAYER_NOT_IN_ROOM");
+          }
+
+          const offsetMs = Math.max(-1_500, Math.min(1_500, parsed.data.offsetMs));
+          const rttMs = Math.max(10, Math.min(3_000, parsed.data.rttMs));
+          const smoothedOffset = Math.round((player.net.offsetMs * 3 + offsetMs) / 4);
+          const smoothedRtt = Math.round((player.net.rttMs * 3 + rttMs) / 4);
+          const jitter = updateJitter({
+            offsetMs: smoothedOffset,
+            rttMs: smoothedRtt,
+            previousRttMs: player.net.rttMs,
+          });
+
+          player.net.offsetMs = smoothedOffset;
+          player.net.rttMs = smoothedRtt;
+          player.net.jitterMs = jitter;
+          player.net.syncSampleCount += 1;
+          player.net.lastSyncAtMs = Date.now();
+
+          return room;
+        });
+
+        ack?.(ok({ accepted: true }));
+      } catch (error) {
+        if (error instanceof RoomNotFoundError) {
+          ack?.(failure("ROOM_NOT_FOUND", "Room does not exist."));
+          return;
+        }
+
+        if (error instanceof Error && error.message === "PLAYER_NOT_IN_ROOM") {
+          ack?.(failure("PLAYER_NOT_IN_ROOM", "Player is not in room."));
+          return;
+        }
+
+        ack?.(failure("SYNC_TIME_METRICS_FAILED", "Unable to apply sync metrics."));
+      }
     });
 
     socket.on("start_game", async (rawPayload: unknown, ack?: (response: Ack) => void) => {
@@ -490,18 +635,46 @@ export class GameGateway {
             throw new Error("QUESTION_ALREADY_PLAYED");
           }
 
+          const expectedQuestionId = lockedRoom.game.board.remainingQuestionIds[0];
+          if (expectedQuestionId !== payload.questionId) {
+            throw new Error("OUT_OF_ORDER_QUESTION");
+          }
+
           openQuestion(lockedRoom, {
             ...question,
             answerTimeLimitMs: question.answerTimeLimitMs ?? lockedRoom.settings.defaultAnswerTimeLimitMs,
           });
 
+          const readStartedAtServerMs = Date.now();
+          const revealDurationMs = this.computeQuestionRevealDurationMs(question.prompt);
+          const readEndsAtServerMs = readStartedAtServerMs + revealDurationMs;
+          const closeAtServerMs = readEndsAtServerMs + (lockedRoom.settings.buzzWindowMs ?? 5_000);
+
+          lockedRoom.game.buzzer.readStartedAtServerMs = readStartedAtServerMs;
+          lockedRoom.game.buzzer.readEndsAtServerMs = readEndsAtServerMs;
+          lockedRoom.game.buzzer.openAtServerMs = readEndsAtServerMs;
+          lockedRoom.game.buzzer.closeAtServerMs = closeAtServerMs;
+          lockedRoom.game.buzzer.openedAtServerMs = null;
+
           return lockedRoom;
         });
+
+        this.clearBuzzerFinalizationTimer(payload.roomCode);
+        this.clearAnswerDeadlineTimer(payload.roomCode);
+        if (room.game.buzzer.readEndsAtServerMs) {
+          this.scheduleQuestionWindowOpen(payload.roomCode, room.game.buzzer.readEndsAtServerMs);
+        }
 
         this.io.to(payload.roomCode).emit("question_opened", {
           questionId: payload.questionId,
           prompt: question.prompt,
           points: question.points,
+          readStartedAtServerMs: room.game.buzzer.readStartedAtServerMs,
+          readEndsAtServerMs: room.game.buzzer.readEndsAtServerMs,
+          buzzOpenAtServerMs: room.game.buzzer.openAtServerMs,
+          buzzCloseAtServerMs: room.game.buzzer.closeAtServerMs,
+          buzzWindowMs: room.settings.buzzWindowMs ?? 5_000,
+          falseStartsEnabled: room.settings.allowFalseStarts ?? true,
           openedAtServerMs: room.game.buzzer.openedAtServerMs,
         });
 
@@ -523,6 +696,11 @@ export class GameGateway {
           return;
         }
 
+        if (error instanceof Error && error.message === "OUT_OF_ORDER_QUESTION") {
+          ack?.(failure("OUT_OF_ORDER_QUESTION", "Questions must be played in order."));
+          return;
+        }
+
         ack?.(failure("SELECT_FAILED", "Unable to select question."));
       }
     });
@@ -538,7 +716,7 @@ export class GameGateway {
       const recvServerMs = Date.now();
 
       try {
-        const room = await this.roomStore.withRoomLock(payload.roomCode, async (lockedRoom) => {
+        const outcome = await this.roomStore.withRoomLock(payload.roomCode, async (lockedRoom) => {
           if (lockedRoom.status !== "QUESTION_OPEN") {
             throw new Error("BUZZ_CLOSED");
           }
@@ -556,8 +734,18 @@ export class GameGateway {
             throw new Error("LOCKED_OUT");
           }
 
-          const effectiveOffsetMs = payload.offsetMs ?? player.net.offsetMs;
-          const effectiveRttMs = payload.rttMs ?? player.net.rttMs;
+          if (lockedRoom.game.buzzer.attempts.some((attempt) => attempt.userId === player.userId)) {
+            throw new Error("DUPLICATE_BUZZ");
+          }
+
+          const openAtServerMs = lockedRoom.game.buzzer.openAtServerMs;
+          const closeAtServerMs = lockedRoom.game.buzzer.closeAtServerMs;
+          if (!openAtServerMs || !closeAtServerMs) {
+            throw new Error("BUZZ_CLOSED");
+          }
+
+          const effectiveOffsetMs = player.net.offsetMs;
+          const effectiveRttMs = player.net.rttMs;
           const effectivePressMs = computeEffectivePressMs({
             recvServerMs,
             pressClientMs: payload.pressClientMs,
@@ -577,6 +765,55 @@ export class GameGateway {
           player.net.syncSampleCount += 1;
           player.net.lastSyncAtMs = Date.now();
 
+          if (effectivePressMs < openAtServerMs - EARLY_PRESS_TOLERANCE_MS) {
+            if (lockedRoom.settings.allowFalseStarts ?? true) {
+              player.canBuzz = false;
+              if (!lockedRoom.game.buzzer.lockedOutUserIds.includes(player.userId)) {
+                lockedRoom.game.buzzer.lockedOutUserIds.push(player.userId);
+              }
+
+              const stillEligible = Object.values(lockedRoom.players).some(
+                (candidate) =>
+                  candidate.connected &&
+                  candidate.canBuzz &&
+                  !lockedRoom.game.buzzer.lockedOutUserIds.includes(candidate.userId),
+              );
+
+              if (!stillEligible) {
+                closeQuestion(lockedRoom);
+                completeIfBoardFinished(lockedRoom);
+                return {
+                  room: lockedRoom,
+                  rejectionCode: "FALSE_START",
+                  questionClosed: {
+                    questionId: payload.questionId,
+                    correctAnswerDisplay: lockedRoom.game.currentQuestion?.answerDisplay ?? "",
+                  },
+                };
+              }
+              return {
+                room: lockedRoom,
+                rejectionCode: "FALSE_START",
+                questionClosed: null as null | {
+                  questionId: string;
+                  correctAnswerDisplay: string;
+                },
+              };
+            }
+
+            throw new Error("TOO_EARLY");
+          }
+
+          if (effectivePressMs > closeAtServerMs) {
+            throw new Error("BUZZ_WINDOW_CLOSED");
+          }
+
+          if (lockedRoom.game.buzzer.state !== "OPEN") {
+            lockedRoom.game.buzzer.state = "OPEN";
+            lockedRoom.game.buzzer.openedAtServerMs = openAtServerMs;
+          }
+
+          const hadAttempts = lockedRoom.game.buzzer.attempts.length > 0;
           lockedRoom.game.buzzer.attempts.push({
             userId: player.userId,
             recvServerMs,
@@ -587,14 +824,45 @@ export class GameGateway {
           });
 
           if (!lockedRoom.game.buzzer.resolveAtServerMs) {
-            lockedRoom.game.buzzer.resolveAtServerMs = recvServerMs + lockedRoom.settings.buzzResolveWindowMs;
+            lockedRoom.game.buzzer.resolveAtServerMs = Math.min(
+              recvServerMs + lockedRoom.settings.buzzResolveWindowMs,
+              closeAtServerMs,
+            );
             this.scheduleBuzzerFinalization(lockedRoom.code, lockedRoom.game.buzzer.resolveAtServerMs);
           }
 
-          return lockedRoom;
+          if (!hadAttempts) {
+            this.clearQuestionWindowTimer(lockedRoom.code);
+          }
+
+          return {
+            room: lockedRoom,
+            rejectionCode: null as string | null,
+            questionClosed: null as null | {
+              questionId: string;
+              correctAnswerDisplay: string;
+            },
+          };
         });
 
-        this.emitRoomState(room);
+        this.emitRoomState(outcome.room);
+
+        if (outcome.rejectionCode) {
+          if (outcome.questionClosed) {
+            this.clearQuestionWindowTimer(payload.roomCode);
+            this.clearBuzzerFinalizationTimer(payload.roomCode);
+            this.io.to(payload.roomCode).emit("question_closed", {
+              questionId: outcome.questionClosed.questionId,
+              correctAnswerDisplay: outcome.questionClosed.correctAnswerDisplay,
+              scores: this.extractScores(outcome.room),
+            });
+          }
+
+          ack?.(failure(outcome.rejectionCode, "Buzz attempt rejected."));
+          socket.emit("buzz_rejected", { reason: outcome.rejectionCode });
+          return;
+        }
+
         ack?.(ok({ recvServerMs }));
       } catch (error) {
         if (error instanceof Error) {
@@ -638,6 +906,7 @@ export class GameGateway {
           }
 
           const result = evaluateAnswer(payload.answerText, acceptedAnswers);
+          let wrongOutcome: "REOPENED" | "CLOSED" | null = null;
 
           if (result.isCorrect) {
             applyScoreDelta(room, socket.data.userId, currentQuestion.points);
@@ -645,7 +914,9 @@ export class GameGateway {
             completeIfBoardFinished(room);
           } else {
             applyScoreDelta(room, socket.data.userId, -currentQuestion.points);
-            const wrongOutcome = markWrongAnswer(room, socket.data.userId);
+            wrongOutcome = markWrongAnswer(room, socket.data.userId, {
+              reopenWindowMs: room.settings.buzzWindowMs ?? 5_000,
+            });
 
             if (wrongOutcome === "CLOSED") {
               closeQuestion(room);
@@ -659,8 +930,11 @@ export class GameGateway {
             isCorrect: result.isCorrect,
             scoreDelta: result.isCorrect ? currentQuestion.points : -currentQuestion.points,
             correctAnswerDisplay: currentQuestion.answerDisplay,
+            buzzReopened: wrongOutcome === "REOPENED",
           };
         });
+
+        this.clearAnswerDeadlineTimer(payload.roomCode);
 
         this.io.to(payload.roomCode).emit("answer_result", {
           questionId: payload.questionId,
@@ -674,11 +948,15 @@ export class GameGateway {
         });
 
         if (outcome.isCorrect || outcome.room.status === "QUESTION_CLOSED" || outcome.room.status === "FINISHED") {
+          this.clearQuestionWindowTimer(payload.roomCode);
+          this.clearBuzzerFinalizationTimer(payload.roomCode);
           this.io.to(payload.roomCode).emit("question_closed", {
             questionId: payload.questionId,
             correctAnswerDisplay: outcome.correctAnswerDisplay,
             scores: this.extractScores(outcome.room),
           });
+        } else if (outcome.buzzReopened && outcome.room.game.buzzer.closeAtServerMs) {
+          this.scheduleQuestionWindowClose(payload.roomCode, outcome.room.game.buzzer.closeAtServerMs);
         }
 
         this.emitRoomState(outcome.room);
@@ -701,7 +979,7 @@ export class GameGateway {
       }
 
       try {
-        const room = await this.roomStore.withRoomLock(parsed.data.roomCode, async (lockedRoom) => {
+        await this.roomStore.withRoomLock(parsed.data.roomCode, async (lockedRoom) => {
           const player = lockedRoom.players[socket.data.userId];
           if (!player) {
             throw new Error("PLAYER_NOT_IN_ROOM");
@@ -714,7 +992,6 @@ export class GameGateway {
           return lockedRoom;
         });
 
-        this.emitRoomState(room);
         ack?.(ok({ now: Date.now() }));
       } catch (error) {
         ack?.(failure("HEARTBEAT_FAILED", "Unable to process heartbeat."));
@@ -742,6 +1019,7 @@ export class GameGateway {
             migration: null,
             disconnectedUserId: null as string | null,
             graceMs: room.settings.disconnectGraceMs,
+            clearAnswerTimer: false,
           };
         }
 
@@ -749,14 +1027,18 @@ export class GameGateway {
         player.lastSeenAtMs = Date.now();
 
         const currentQuestion = room.game.currentQuestion;
+        let clearAnswerTimer = false;
 
         if (
           currentQuestion &&
           room.status === "ANSWERING" &&
           room.game.answering.activeUserId === player.userId
         ) {
+          clearAnswerTimer = true;
           applyScoreDelta(room, player.userId, -currentQuestion.points);
-          const wrongOutcome = markWrongAnswer(room, player.userId);
+          const wrongOutcome = markWrongAnswer(room, player.userId, {
+            reopenWindowMs: room.settings.buzzWindowMs ?? 5_000,
+          });
           if (wrongOutcome === "CLOSED") {
             closeQuestion(room);
             completeIfBoardFinished(room);
@@ -770,8 +1052,24 @@ export class GameGateway {
           migration,
           disconnectedUserId: player.userId,
           graceMs: room.settings.disconnectGraceMs,
+          clearAnswerTimer,
+          buzzReopened:
+            room.status === "QUESTION_OPEN" &&
+            room.game.buzzer.state === "OPEN" &&
+            room.game.buzzer.closeAtServerMs != null,
         };
       });
+
+      if (outcome.clearAnswerTimer) {
+        this.clearAnswerDeadlineTimer(roomCode);
+      }
+
+      if (outcome.buzzReopened && outcome.room.game.buzzer.closeAtServerMs) {
+        this.scheduleQuestionWindowClose(roomCode, outcome.room.game.buzzer.closeAtServerMs);
+      } else if (outcome.room.status === "QUESTION_CLOSED" || outcome.room.status === "FINISHED") {
+        this.clearQuestionWindowTimer(roomCode);
+        this.clearBuzzerFinalizationTimer(roomCode);
+      }
 
       if (outcome.disconnectedUserId) {
         this.io.to(roomCode).emit("player_presence", {
@@ -797,6 +1095,64 @@ export class GameGateway {
     }
   }
 
+  private clearBuzzerFinalizationTimer(roomCode: string): void {
+    const existing = this.buzzerTimers.get(roomCode);
+    if (!existing) {
+      return;
+    }
+
+    clearTimeout(existing);
+    this.buzzerTimers.delete(roomCode);
+  }
+
+  private clearQuestionWindowTimer(roomCode: string): void {
+    const existing = this.questionWindowTimers.get(roomCode);
+    if (!existing) {
+      return;
+    }
+
+    clearTimeout(existing);
+    this.questionWindowTimers.delete(roomCode);
+  }
+
+  private scheduleQuestionWindowOpen(roomCode: string, openAtServerMs: number): void {
+    this.clearQuestionWindowTimer(roomCode);
+
+    const timeoutMs = Math.max(0, openAtServerMs - Date.now());
+    const timer = setTimeout(() => {
+      void this.handleQuestionWindowOpen(roomCode);
+    }, timeoutMs);
+
+    this.questionWindowTimers.set(roomCode, timer);
+  }
+
+  private scheduleQuestionWindowClose(roomCode: string, closeAtServerMs: number): void {
+    this.clearQuestionWindowTimer(roomCode);
+
+    const timeoutMs = Math.max(0, closeAtServerMs - Date.now());
+    const timer = setTimeout(() => {
+      void this.handleQuestionWindowClose(roomCode);
+    }, timeoutMs);
+
+    this.questionWindowTimers.set(roomCode, timer);
+  }
+
+  private clearAnswerDeadlineTimer(roomCode: string): void {
+    const existing = this.answerTimers.get(roomCode);
+    if (!existing) {
+      return;
+    }
+
+    clearTimeout(existing);
+    this.answerTimers.delete(roomCode);
+  }
+
+  private clearRoomTimers(roomCode: string): void {
+    this.clearBuzzerFinalizationTimer(roomCode);
+    this.clearQuestionWindowTimer(roomCode);
+    this.clearAnswerDeadlineTimer(roomCode);
+  }
+
   private scheduleDisconnectExpiry(roomCode: string, userId: string, graceMs: number): void {
     const key = `${roomCode}:${userId}`;
 
@@ -810,6 +1166,292 @@ export class GameGateway {
     }, graceMs);
 
     this.disconnectTimers.set(key, timer);
+  }
+
+  private scheduleAnswerDeadline(roomCode: string, deadlineServerMs: number): void {
+    this.clearAnswerDeadlineTimer(roomCode);
+
+    const timeoutMs = Math.max(0, deadlineServerMs - Date.now());
+    const timer = setTimeout(() => {
+      void this.handleAnswerDeadline(roomCode);
+    }, timeoutMs);
+
+    this.answerTimers.set(roomCode, timer);
+  }
+
+  private async handleQuestionWindowOpen(roomCode: string): Promise<void> {
+    this.questionWindowTimers.delete(roomCode);
+
+    try {
+      const outcome = await this.roomStore.withRoomLock(roomCode, async (room) => {
+        if (room.status !== "QUESTION_OPEN") {
+          return {
+            room,
+            opened: null as null | {
+              questionId: string;
+              openAtServerMs: number;
+              closeAtServerMs: number;
+            },
+            closed: null as null | {
+              questionId: string;
+              correctAnswerDisplay: string;
+            },
+          };
+        }
+
+        const question = room.game.currentQuestion;
+        const openAtServerMs = room.game.buzzer.openAtServerMs;
+        const closeAtServerMs = room.game.buzzer.closeAtServerMs;
+        if (!question || !openAtServerMs || !closeAtServerMs) {
+          return {
+            room,
+            opened: null as null | {
+              questionId: string;
+              openAtServerMs: number;
+              closeAtServerMs: number;
+            },
+            closed: null as null | {
+              questionId: string;
+              correctAnswerDisplay: string;
+            },
+          };
+        }
+
+        if (Date.now() >= closeAtServerMs) {
+          closeQuestion(room);
+          completeIfBoardFinished(room);
+          return {
+            room,
+            opened: null as null | {
+              questionId: string;
+              openAtServerMs: number;
+              closeAtServerMs: number;
+            },
+            closed: {
+              questionId: question.id,
+              correctAnswerDisplay: question.answerDisplay,
+            },
+          };
+        }
+
+        const eligiblePlayers = Object.values(room.players).some(
+          (player) =>
+            player.connected &&
+            player.canBuzz &&
+            !room.game.buzzer.lockedOutUserIds.includes(player.userId),
+        );
+        if (!eligiblePlayers) {
+          closeQuestion(room);
+          completeIfBoardFinished(room);
+          return {
+            room,
+            opened: null as null | {
+              questionId: string;
+              openAtServerMs: number;
+              closeAtServerMs: number;
+            },
+            closed: {
+              questionId: question.id,
+              correctAnswerDisplay: question.answerDisplay,
+            },
+          };
+        }
+
+        room.game.buzzer.state = "OPEN";
+        room.game.buzzer.openedAtServerMs = openAtServerMs;
+
+        return {
+          room,
+          opened: {
+            questionId: question.id,
+            openAtServerMs,
+            closeAtServerMs,
+          },
+          closed: null as null | {
+            questionId: string;
+            correctAnswerDisplay: string;
+          },
+        };
+      });
+
+      if (outcome.opened) {
+        this.io.to(roomCode).emit("buzzer_window_opened", {
+          questionId: outcome.opened.questionId,
+          openAtServerMs: outcome.opened.openAtServerMs,
+          closeAtServerMs: outcome.opened.closeAtServerMs,
+        });
+        this.scheduleQuestionWindowClose(roomCode, outcome.opened.closeAtServerMs);
+      } else if (outcome.closed) {
+        this.clearBuzzerFinalizationTimer(roomCode);
+        this.io.to(roomCode).emit("question_closed", {
+          questionId: outcome.closed.questionId,
+          correctAnswerDisplay: outcome.closed.correctAnswerDisplay,
+          scores: this.extractScores(outcome.room),
+        });
+      }
+
+      this.emitRoomState(outcome.room);
+    } catch (error) {
+      logger.warn("question window open handling failed", { roomCode, error });
+    }
+  }
+
+  private async handleQuestionWindowClose(roomCode: string): Promise<void> {
+    this.questionWindowTimers.delete(roomCode);
+
+    try {
+      const outcome = await this.roomStore.withRoomLock(roomCode, async (room) => {
+        if (room.status !== "QUESTION_OPEN") {
+          return {
+            room,
+            closed: null as null | {
+              questionId: string;
+              correctAnswerDisplay: string;
+            },
+            shouldFinalize: false,
+            resolveAtServerMs: null as number | null,
+          };
+        }
+
+        if (room.game.buzzer.attempts.length > 0 && room.game.buzzer.resolveAtServerMs) {
+          return {
+            room,
+            closed: null as null | {
+              questionId: string;
+              correctAnswerDisplay: string;
+            },
+            shouldFinalize: true,
+            resolveAtServerMs: room.game.buzzer.resolveAtServerMs,
+          };
+        }
+
+        const question = room.game.currentQuestion;
+        if (!question) {
+          return {
+            room,
+            closed: null as null | {
+              questionId: string;
+              correctAnswerDisplay: string;
+            },
+            shouldFinalize: false,
+            resolveAtServerMs: null as number | null,
+          };
+        }
+
+        closeQuestion(room);
+        completeIfBoardFinished(room);
+        return {
+          room,
+          closed: {
+            questionId: question.id,
+            correctAnswerDisplay: question.answerDisplay,
+          },
+          shouldFinalize: false,
+          resolveAtServerMs: null as number | null,
+        };
+      });
+
+      if (outcome.shouldFinalize && outcome.resolveAtServerMs) {
+        this.scheduleBuzzerFinalization(roomCode, outcome.resolveAtServerMs);
+      }
+
+      if (outcome.closed) {
+        this.clearBuzzerFinalizationTimer(roomCode);
+        this.io.to(roomCode).emit("question_closed", {
+          questionId: outcome.closed.questionId,
+          correctAnswerDisplay: outcome.closed.correctAnswerDisplay,
+          scores: this.extractScores(outcome.room),
+        });
+      }
+
+      this.emitRoomState(outcome.room);
+    } catch (error) {
+      logger.warn("question window close handling failed", { roomCode, error });
+    }
+  }
+
+  private async handleAnswerDeadline(roomCode: string): Promise<void> {
+    this.answerTimers.delete(roomCode);
+
+    try {
+      const outcome = await this.roomStore.withRoomLock(roomCode, async (room) => {
+        if (room.status !== "ANSWERING") {
+          return { room, result: null as null | {
+            questionId: string;
+            userId: string;
+            scoreDelta: number;
+            correctAnswerDisplay: string;
+            shouldCloseQuestion: boolean;
+            buzzReopened: boolean;
+          } };
+        }
+
+        const currentQuestion = room.game.currentQuestion;
+        const activeUserId = room.game.answering.activeUserId;
+        if (!currentQuestion || !activeUserId) {
+          return { room, result: null as null | {
+            questionId: string;
+            userId: string;
+            scoreDelta: number;
+            correctAnswerDisplay: string;
+            shouldCloseQuestion: boolean;
+            buzzReopened: boolean;
+          } };
+        }
+
+        applyScoreDelta(room, activeUserId, -currentQuestion.points);
+        const wrongOutcome = markWrongAnswer(room, activeUserId, {
+          reopenWindowMs: room.settings.buzzWindowMs ?? 5_000,
+        });
+
+        if (wrongOutcome === "CLOSED") {
+          closeQuestion(room);
+          completeIfBoardFinished(room);
+        }
+
+        return {
+          room,
+          result: {
+            questionId: currentQuestion.id,
+            userId: activeUserId,
+            scoreDelta: -currentQuestion.points,
+            correctAnswerDisplay: currentQuestion.answerDisplay,
+            shouldCloseQuestion: wrongOutcome === "CLOSED",
+            buzzReopened: wrongOutcome === "REOPENED",
+          },
+        };
+      });
+
+      if (outcome.result) {
+        this.io.to(roomCode).emit("answer_result", {
+          questionId: outcome.result.questionId,
+          userId: outcome.result.userId,
+          isCorrect: false,
+          scoreDelta: outcome.result.scoreDelta,
+          timedOut: true,
+          normalizedInput: "",
+          matchedAnswerId: null,
+          distance: null,
+          threshold: null,
+        });
+
+        if (outcome.result.shouldCloseQuestion) {
+          this.clearQuestionWindowTimer(roomCode);
+          this.clearBuzzerFinalizationTimer(roomCode);
+          this.io.to(roomCode).emit("question_closed", {
+            questionId: outcome.result.questionId,
+            correctAnswerDisplay: outcome.result.correctAnswerDisplay,
+            scores: this.extractScores(outcome.room),
+          });
+        } else if (outcome.result.buzzReopened && outcome.room.game.buzzer.closeAtServerMs) {
+          this.scheduleQuestionWindowClose(roomCode, outcome.room.game.buzzer.closeAtServerMs);
+        }
+      }
+
+      this.emitRoomState(outcome.room);
+    } catch (error) {
+      logger.warn("answer deadline handling failed", { roomCode, error });
+    }
   }
 
   private async expireDisconnectedPlayer(roomCode: string, userId: string): Promise<void> {
@@ -840,6 +1482,7 @@ export class GameGateway {
       });
 
       if (outcome.roomEmpty) {
+        this.clearRoomTimers(roomCode);
         await this.roomStore.deleteByCode(roomCode);
         return;
       }
@@ -867,10 +1510,7 @@ export class GameGateway {
   }
 
   private scheduleBuzzerFinalization(roomCode: string, resolveAtServerMs: number): void {
-    const existing = this.buzzerTimers.get(roomCode);
-    if (existing) {
-      clearTimeout(existing);
-    }
+    this.clearBuzzerFinalizationTimer(roomCode);
 
     const timeoutMs = Math.max(0, resolveAtServerMs - Date.now());
 
@@ -923,6 +1563,13 @@ export class GameGateway {
         return;
       }
 
+      const answerDeadlineMs = outcome.room.game.answering.deadlineServerMs;
+      if (answerDeadlineMs) {
+        this.scheduleAnswerDeadline(roomCode, answerDeadlineMs);
+      }
+
+      this.clearQuestionWindowTimer(roomCode);
+
       this.io.to(roomCode).emit("buzz_locked", {
         questionId: outcome.result.questionId,
         winnerUserId: outcome.result.winnerUserId,
@@ -934,6 +1581,82 @@ export class GameGateway {
     } catch (error) {
       logger.error("finalizeBuzzer failed", { roomCode, error });
     }
+  }
+
+  private computeQuestionRevealDurationMs(prompt: string): number {
+    const estimatedMs = prompt.trim().length * QUESTION_REVEAL_PER_CHAR_MS;
+    return Math.max(QUESTION_REVEAL_MIN_MS, Math.min(QUESTION_REVEAL_MAX_MS, estimatedMs));
+  }
+
+  private validatePackageStructure(questions: QuizQuestionRow[]): PackageStructureValidation {
+    if (questions.length === 0) {
+      return { valid: false, reason: "Selected package has no questions." };
+    }
+
+    const hasOnlyFirstRound = questions.every((question) => question.roundNo === 1);
+    if (!hasOnlyFirstRound) {
+      return { valid: false, reason: "Only single-round packages are supported for now." };
+    }
+
+    const byRow = new Map<number, Map<number, QuizQuestionRow>>();
+    for (const question of questions) {
+      if (!Number.isInteger(question.boardRow) || !Number.isInteger(question.boardCol)) {
+        return { valid: false, reason: "Invalid question coordinates in selected package." };
+      }
+
+      if (question.boardRow < 1 || question.boardCol < 1 || question.boardCol > 5) {
+        return { valid: false, reason: "Question coordinates must be in range row>=1 and col 1..5." };
+      }
+
+      const row = byRow.get(question.boardRow) ?? new Map<number, QuizQuestionRow>();
+      if (row.has(question.boardCol)) {
+        return { valid: false, reason: "Package has duplicate questions in the same row/column slot." };
+      }
+
+      row.set(question.boardCol, question);
+      byRow.set(question.boardRow, row);
+    }
+
+    if (byRow.size < 4 || byRow.size > 8) {
+      return { valid: false, reason: "Package must contain from 4 to 8 themes." };
+    }
+
+    const orderedRows = Array.from(byRow.keys()).sort((a, b) => a - b);
+    const orderedQuestionIds: string[] = [];
+
+    for (const rowNumber of orderedRows) {
+      const row = byRow.get(rowNumber);
+      if (!row || row.size !== 5) {
+        return { valid: false, reason: "Each theme must contain exactly 5 questions." };
+      }
+
+      const orderedCols = Array.from(row.keys()).sort((a, b) => a - b);
+      for (let index = 0; index < 5; index += 1) {
+        if (orderedCols[index] !== index + 1) {
+          return { valid: false, reason: "Questions in each theme must have sequential columns 1..5." };
+        }
+      }
+
+      let previousPoints: number | null = null;
+      for (const col of orderedCols) {
+        const question = row.get(col);
+        if (!question) {
+          continue;
+        }
+
+        if (previousPoints != null && question.points < previousPoints) {
+          return { valid: false, reason: "Question points must increase by difficulty order in each theme." };
+        }
+
+        previousPoints = question.points;
+        orderedQuestionIds.push(question.id);
+      }
+    }
+
+    return {
+      valid: true,
+      orderedQuestionIds,
+    };
   }
 
   private toPublicRoomSummary(room: RoomState): PublicRoomSummary {

@@ -22,7 +22,9 @@ export const defaultRoomSettings = (defaults: {
   maxPlayers: 6,
   disconnectGraceMs: 30_000,
   buzzResolveWindowMs: defaults.buzzResolveWindowMs,
+  buzzWindowMs: 5_000,
   defaultAnswerTimeLimitMs: defaults.defaultAnswerTimeLimitMs,
+  allowFalseStarts: true,
 });
 
 export const mergeRoomSettings = (
@@ -37,12 +39,14 @@ export const mergeRoomSettings = (
     maxPlayers: partial.maxPlayers ?? base.maxPlayers,
     disconnectGraceMs: partial.disconnectGraceMs ?? base.disconnectGraceMs,
     buzzResolveWindowMs: partial.buzzResolveWindowMs ?? base.buzzResolveWindowMs,
+    buzzWindowMs: partial.buzzWindowMs ?? base.buzzWindowMs,
     defaultAnswerTimeLimitMs: partial.defaultAnswerTimeLimitMs ?? base.defaultAnswerTimeLimitMs,
+    allowFalseStarts: partial.allowFalseStarts ?? base.allowFalseStarts,
   };
 };
 
 export const createInitialRoomState = (input: CreateRoomStateInput): RoomState => ({
-  schemaVersion: 1,
+  schemaVersion: 2,
   version: 1,
   roomId: input.roomId,
   code: input.roomCode,
@@ -83,6 +87,10 @@ export const createInitialRoomState = (input: CreateRoomStateInput): RoomState =
     currentQuestion: null,
     buzzer: {
       state: "CLOSED",
+      readStartedAtServerMs: null,
+      readEndsAtServerMs: null,
+      openAtServerMs: null,
+      closeAtServerMs: null,
       openedAtServerMs: null,
       resolveAtServerMs: null,
       winnerUserId: null,

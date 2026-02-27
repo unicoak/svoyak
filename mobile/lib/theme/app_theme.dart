@@ -1,5 +1,4 @@
 import 'package:flutter/material.dart';
-import 'package:google_fonts/google_fonts.dart';
 
 class AppPalette {
   static const Color background = Color(0xFF060B1A);
@@ -19,10 +18,10 @@ class AppTheme {
   static ThemeData get theme {
     final ThemeData base = ThemeData.dark(useMaterial3: true);
 
-    final TextTheme textTheme =
-        GoogleFonts.manropeTextTheme(base.textTheme).apply(
+    final TextTheme textTheme = base.textTheme.apply(
       bodyColor: AppPalette.textPrimary,
       displayColor: AppPalette.textPrimary,
+      fontFamily: 'Avenir Next',
     );
 
     return base.copyWith(

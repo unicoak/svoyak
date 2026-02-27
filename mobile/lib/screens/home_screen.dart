@@ -1,11 +1,15 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:google_fonts/google_fonts.dart';
 
 import '../core/game_controller.dart';
+import '../core/player_profile_store.dart';
 import '../models/public_room_view.dart';
 import '../models/room_state_view.dart';
 import '../theme/app_theme.dart';
+
+enum _HomeStage { start, lobby, game }
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
@@ -15,291 +19,632 @@ class HomeScreen extends StatefulWidget {
 }
 
 class _HomeScreenState extends State<HomeScreen> {
-  late final GameController _controller;
+  static const Map<int, String> _kraftTopicsByRow = <int, String>{
+    1: 'ПРЯНОСТИ',
+    2: 'КРЫЛЬЯ',
+    3: 'НАЧИНАЕТСЯ С ПРИСТАВКИ',
+    4: 'МАТРИЧНАЯ -МИР-',
+    5: 'ИГРЫ',
+    6: 'КОРОЛЕВСКОЕ ГЕОГРАФИЧЕСКОЕ ОБЩЕСТВО',
+  };
 
-  final TextEditingController _displayNameController =
-      TextEditingController(text: 'Player');
-  final TextEditingController _packageIdController = TextEditingController();
+  final PlayerProfileStore _profileStore = PlayerProfileStore();
+
+  final TextEditingController _registrationNicknameController =
+      TextEditingController();
+  final TextEditingController _packageSearchController =
+      TextEditingController();
   final TextEditingController _roomCodeController = TextEditingController();
-  final TextEditingController _questionIdController = TextEditingController();
   final TextEditingController _answerController = TextEditingController();
 
-  bool _logsExpanded = false;
+  GameController? _controller;
+  PlayerProfile? _profile;
+  _HomeStage _stage = _HomeStage.start;
+  bool _isBootstrapping = true;
+  bool _isRegistering = false;
+  int? _packageDifficultyFilter;
+  Timer? _clockTicker;
+  int _nowMs = DateTime.now().millisecondsSinceEpoch;
+  int _lastSeenFlashVersion = 0;
 
   @override
   void initState() {
     super.initState();
-    _controller = GameController()..addListener(_rebuild);
+    _bootstrapProfile();
   }
 
-  void _rebuild() {
-    if (mounted) {
-      setState(() {});
+  Future<void> _bootstrapProfile() async {
+    final PlayerProfile? profile = await _profileStore.loadProfile();
+    if (!mounted) {
+      return;
+    }
+
+    if (profile != null) {
+      _registrationNicknameController.text = profile.nickname;
+      _attachController(profile);
+    }
+
+    setState(() {
+      _profile = profile;
+      _isBootstrapping = false;
+    });
+  }
+
+  void _attachController(PlayerProfile profile) {
+    _disposeController();
+    final GameController controller = GameController(userId: profile.userId)
+      ..addListener(_onControllerChanged);
+    _controller = controller;
+  }
+
+  void _disposeController() {
+    final GameController? controller = _controller;
+    if (controller == null) {
+      return;
+    }
+
+    controller.removeListener(_onControllerChanged);
+    controller.dispose();
+    _controller = null;
+  }
+
+  void _onControllerChanged() {
+    if (!mounted) {
+      return;
+    }
+
+    final GameController? game = _controller;
+    if (game == null) {
+      return;
+    }
+
+    setState(() {
+      if (game.roomState != null) {
+        _stage = _HomeStage.game;
+      } else if (_stage == _HomeStage.game) {
+        _stage = _HomeStage.lobby;
+      }
+    });
+
+    _syncClockTicker(game);
+
+    if (game.flashMessage != null &&
+        game.flashMessageVersion > _lastSeenFlashVersion) {
+      _lastSeenFlashVersion = game.flashMessageVersion;
+      final String message = game.flashMessage!;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) {
+          return;
+        }
+        final messenger = ScaffoldMessenger.maybeOf(context);
+        messenger?.hideCurrentSnackBar();
+        messenger?.showSnackBar(
+          SnackBar(
+            content: Text(message),
+            behavior: SnackBarBehavior.floating,
+          ),
+        );
+      });
     }
   }
 
   @override
   void dispose() {
-    _controller.removeListener(_rebuild);
-    _controller.dispose();
-
-    _displayNameController.dispose();
-    _packageIdController.dispose();
+    _stopClockTicker();
+    _disposeController();
+    _registrationNicknameController.dispose();
+    _packageSearchController.dispose();
     _roomCodeController.dispose();
-    _questionIdController.dispose();
     _answerController.dispose();
-
     super.dispose();
+  }
+
+  bool _shouldRunClockTicker(GameController game) {
+    if (_stage != _HomeStage.game) {
+      return false;
+    }
+
+    final RoomStateView? roomState = game.roomState;
+    if (roomState == null) {
+      return false;
+    }
+
+    if (roomState.status != 'QUESTION_OPEN') {
+      return false;
+    }
+
+    final bool hasRevealWindow = roomState.readStartedAtServerMs != null &&
+        roomState.readEndsAtServerMs != null;
+    final bool hasBuzzWindow = roomState.buzzOpenAtServerMs != null &&
+        roomState.buzzCloseAtServerMs != null;
+    return hasRevealWindow || hasBuzzWindow;
+  }
+
+  void _syncClockTicker(GameController game) {
+    if (_shouldRunClockTicker(game)) {
+      _startClockTicker();
+    } else {
+      _stopClockTicker();
+    }
+  }
+
+  void _startClockTicker() {
+    if (_clockTicker != null) {
+      return;
+    }
+
+    _clockTicker = Timer.periodic(const Duration(milliseconds: 220), (_) {
+      if (!mounted || _stage != _HomeStage.game) {
+        return;
+      }
+
+      setState(() {
+        _nowMs = DateTime.now().millisecondsSinceEpoch;
+      });
+    });
+  }
+
+  void _stopClockTicker() {
+    _clockTicker?.cancel();
+    _clockTicker = null;
   }
 
   @override
   Widget build(BuildContext context) {
-    final RoomStateView? roomState = _controller.roomState;
+    if (_isBootstrapping) {
+      return Scaffold(
+        body: Stack(
+          children: <Widget>[
+            _buildBackground(),
+            const SafeArea(
+              child: Center(
+                child: CircularProgressIndicator(),
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+
+    if (_profile == null || _controller == null) {
+      return Scaffold(
+        body: Stack(
+          children: <Widget>[
+            _buildBackground(),
+            SafeArea(child: _buildRegistrationStage()),
+          ],
+        ),
+      );
+    }
+
+    final GameController game = _controller!;
+    final RoomStateView? roomState = game.roomState;
 
     return Scaffold(
       body: Stack(
         children: <Widget>[
           _buildBackground(),
           SafeArea(
-            child: LayoutBuilder(
-              builder: (BuildContext context, BoxConstraints constraints) {
-                return SingleChildScrollView(
-                  padding: const EdgeInsets.fromLTRB(16, 12, 16, 18),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: <Widget>[
-                      _buildTopCard(roomState),
-                      const SizedBox(height: 14),
-                      if (roomState == null)
-                        _buildLobbyLayout(constraints.maxWidth)
-                      else
-                        _buildGameLayout(roomState, constraints.maxWidth),
-                    ],
+            child: AnimatedSwitcher(
+              duration: const Duration(milliseconds: 220),
+              child: _buildCurrentStage(game, roomState),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildCurrentStage(GameController game, RoomStateView? roomState) {
+    switch (_stage) {
+      case _HomeStage.start:
+        return KeyedSubtree(
+          key: const ValueKey<String>('start'),
+          child: _buildStartStage(game),
+        );
+      case _HomeStage.lobby:
+        return KeyedSubtree(
+          key: const ValueKey<String>('lobby'),
+          child: _buildLobbyStage(game),
+        );
+      case _HomeStage.game:
+        return KeyedSubtree(
+          key: const ValueKey<String>('game'),
+          child: roomState == null
+              ? _buildLobbyStage(game)
+              : _buildGameStage(game, roomState),
+        );
+    }
+  }
+
+  Widget _buildRegistrationStage() {
+    return Center(
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 520),
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.fromLTRB(16, 20, 16, 20),
+          child: _panel(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: <Widget>[
+                Text(
+                  'Добро пожаловать в СИ: Онлайн',
+                  style: _headlineFont(
+                    size: 28,
+                    weight: FontWeight.w800,
+                    letterSpacing: -0.6,
                   ),
-                );
-              },
+                ),
+                const SizedBox(height: 8),
+                Text(
+                  'Перед началом игры зарегистрируйся: выбери никнейм. '
+                  'Профиль сохранится на устройстве до выхода из аккаунта.',
+                  style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                        color: AppPalette.textMuted,
+                        height: 1.35,
+                      ),
+                ),
+                const SizedBox(height: 14),
+                TextField(
+                  controller: _registrationNicknameController,
+                  textCapitalization: TextCapitalization.words,
+                  decoration: const InputDecoration(
+                    labelText: 'Никнейм',
+                    hintText: 'Например, DonSu',
+                  ),
+                ),
+                const SizedBox(height: 14),
+                SizedBox(
+                  width: double.infinity,
+                  child: FilledButton.icon(
+                    onPressed: _isRegistering ? null : _registerProfile,
+                    icon: const Icon(Icons.person_add_alt_1_rounded),
+                    label: Text(_isRegistering
+                        ? 'Регистрация...'
+                        : 'Зарегистрироваться'),
+                  ),
+                ),
+              ],
             ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildBackground() {
-    return Container(
-      decoration: const BoxDecoration(
-        gradient: LinearGradient(
-          colors: <Color>[
-            Color(0xFF060B1A),
-            Color(0xFF08133A),
-            Color(0xFF0B1B4A)
-          ],
-          begin: Alignment.topLeft,
-          end: Alignment.bottomRight,
-        ),
-      ),
-      child: Stack(
-        children: <Widget>[
-          Positioned(
-            top: -120,
-            right: -80,
-            child: _glowOrb(
-              280,
-              const Color(0xAA4A7BFF),
-            ),
-          ),
-          Positioned(
-            bottom: -130,
-            left: -90,
-            child: _glowOrb(
-              260,
-              const Color(0xAA27D5FF),
-            ),
-          ),
-          Positioned(
-            top: 320,
-            left: 190,
-            child: _glowOrb(
-              130,
-              const Color(0x6648B8FF),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _glowOrb(double size, Color color) {
-    return IgnorePointer(
-      child: Container(
-        width: size,
-        height: size,
-        decoration: BoxDecoration(
-          shape: BoxShape.circle,
-          gradient: RadialGradient(
-            colors: <Color>[color, color.withValues(alpha: 0)],
           ),
         ),
       ),
     );
   }
 
-  Widget _buildTopCard(RoomStateView? roomState) {
-    final int playersCount = roomState?.players.length ?? 0;
+  Widget _buildStartStage(GameController game) {
+    final PlayerProfile profile = _profile!;
 
-    return _glassPanel(
-      padding: const EdgeInsets.all(18),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: <Widget>[
-          Row(
+    return Center(
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 560),
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.fromLTRB(16, 20, 16, 20),
+          child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: <Widget>[
-              Expanded(
+              Text(
+                'СИ: Онлайн',
+                style: _headlineFont(
+                  size: 40,
+                  weight: FontWeight.w800,
+                  letterSpacing: -1.0,
+                ),
+              ),
+              const SizedBox(height: 6),
+              Text(
+                'Привет, ${profile.nickname}',
+                style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                      color: AppPalette.accent,
+                      fontWeight: FontWeight.w700,
+                    ),
+              ),
+              const SizedBox(height: 8),
+              Text(
+                'Комнатные интеллектуальные матчи с быстрым подключением друзей.',
+                style: Theme.of(context).textTheme.bodyLarge?.copyWith(
+                      color: AppPalette.textMuted,
+                      height: 1.35,
+                    ),
+              ),
+              const SizedBox(height: 16),
+              _panel(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: <Widget>[
-                    Text(
-                      'СИ: Онлайн',
-                      style: GoogleFonts.sora(
-                        fontSize: 30,
-                        fontWeight: FontWeight.w800,
-                        letterSpacing: -0.8,
-                        color: Colors.white,
+                    Row(
+                      children: <Widget>[
+                        Expanded(
+                          child: _sectionTitle(
+                            'Профиль',
+                            icon: Icons.account_circle_rounded,
+                          ),
+                        ),
+                        OutlinedButton.icon(
+                          onPressed: _logout,
+                          icon: const Icon(Icons.logout_rounded, size: 18),
+                          label: const Text('Log out'),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 12),
+                    Wrap(
+                      spacing: 8,
+                      runSpacing: 8,
+                      children: <Widget>[
+                        _statChip('Никнейм', profile.nickname),
+                        _statChip('Опыт', '${profile.experience}'),
+                        _statChip('Рейтинг', '${profile.rating}'),
+                        _statusPill(
+                          game.isConnected ? 'ONLINE' : 'OFFLINE',
+                          game.isConnected
+                              ? AppPalette.success
+                              : AppPalette.danger,
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 14),
+                    SizedBox(
+                      width: double.infinity,
+                      child: FilledButton.icon(
+                        onPressed: game.isBusy ? null : () => _enterLobby(game),
+                        icon: const Icon(Icons.stadium_rounded, size: 20),
+                        label: const Text('Игровое лобби'),
                       ),
                     ),
-                    const SizedBox(height: 4),
+                    const SizedBox(height: 10),
                     Text(
-                      'Комнатные дуэли с честным buzz и авто-проверкой ответов',
-                      style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                      game.statusMessage,
+                      style: Theme.of(context).textTheme.bodySmall?.copyWith(
                             color: AppPalette.textMuted,
-                            height: 1.3,
                           ),
                     ),
                   ],
                 ),
               ),
-              _statusPill(
-                _controller.isConnected ? 'ONLINE' : 'OFFLINE',
-                _controller.isConnected
-                    ? AppPalette.success
-                    : AppPalette.danger,
-              ),
             ],
           ),
-          const SizedBox(height: 14),
-          Wrap(
-            spacing: 8,
-            runSpacing: 8,
-            children: <Widget>[
-              _metricPill('Latency', '${_controller.rttMs} ms'),
-              _metricPill('Offset', '${_controller.offsetMs} ms'),
-              if (roomState != null) _metricPill('Room', roomState.roomCode),
-              if (roomState != null)
-                _metricPill('Status', _humanStatus(roomState.status)),
-              if (roomState != null) _metricPill('Players', '$playersCount'),
-            ],
-          ),
-          const SizedBox(height: 12),
-          Text(
-            _controller.statusMessage,
-            style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                  color: AppPalette.textMuted,
-                ),
-          ),
-        ],
+        ),
       ),
     );
   }
 
-  Widget _buildLobbyLayout(double width) {
-    final bool wide = width > 880;
+  Widget _buildLobbyStage(GameController game) {
+    final PlayerProfile profile = _profile!;
 
-    return Column(
-      children: <Widget>[
-        _buildConnectPanel(),
-        const SizedBox(height: 14),
-        if (wide)
-          Row(
+    return LayoutBuilder(
+      builder: (BuildContext context, BoxConstraints constraints) {
+        final bool wide = constraints.maxWidth > 980;
+
+        return SingleChildScrollView(
+          padding: const EdgeInsets.fromLTRB(16, 14, 16, 20),
+          child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: <Widget>[
-              Expanded(child: _buildCreateRoomPanel()),
-              const SizedBox(width: 12),
-              Expanded(child: _buildJoinRoomPanel()),
-            ],
-          )
-        else
-          Column(
-            children: <Widget>[
-              _buildCreateRoomPanel(),
+              _panel(
+                child: Row(
+                  children: <Widget>[
+                    IconButton(
+                      tooltip: 'Назад',
+                      onPressed: () {
+                        setState(() {
+                          _stage = _HomeStage.start;
+                        });
+                      },
+                      icon: const Icon(Icons.arrow_back_rounded),
+                    ),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: <Widget>[
+                          Text(
+                            'Игровое лобби',
+                            style: _headlineFont(
+                              size: 24,
+                              weight: FontWeight.w800,
+                            ),
+                          ),
+                          Text(
+                            'Игрок: ${profile.nickname}',
+                            style:
+                                Theme.of(context).textTheme.bodySmall?.copyWith(
+                                      color: AppPalette.textMuted,
+                                    ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    _statusPill(
+                      game.isConnected ? 'ONLINE' : 'OFFLINE',
+                      game.isConnected ? AppPalette.success : AppPalette.danger,
+                    ),
+                    const SizedBox(width: 8),
+                    IconButton(
+                      onPressed: _logout,
+                      tooltip: 'Log out',
+                      icon: const Icon(Icons.logout_rounded),
+                    ),
+                  ],
+                ),
+              ),
               const SizedBox(height: 12),
-              _buildJoinRoomPanel(),
-            ],
-          ),
-      ],
-    );
-  }
-
-  Widget _buildConnectPanel() {
-    return _glassPanel(
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: <Widget>[
-          _sectionTitle('Профиль и сеть', icon: Icons.wifi_tethering),
-          const SizedBox(height: 12),
-          TextField(
-            controller: _displayNameController,
-            decoration: const InputDecoration(labelText: 'Имя игрока'),
-          ),
-          const SizedBox(height: 12),
-          Wrap(
-            spacing: 8,
-            runSpacing: 8,
-            children: <Widget>[
-              FilledButton.icon(
-                onPressed: _controller.isBusy
-                    ? null
-                    : () => _controller.ensureConnected(
-                          _displayNameController.text.trim(),
-                        ),
-                icon: const Icon(Icons.power_rounded, size: 18),
-                label: const Text('Подключиться'),
-              ),
-              OutlinedButton.icon(
-                onPressed: _controller.isBusy ? null : _controller.syncTime,
-                icon: const Icon(Icons.schedule_rounded, size: 18),
-                label: const Text('Синхронизировать время'),
-              ),
-              if (_controller.isBusy)
-                const Padding(
-                  padding: EdgeInsets.only(left: 6, top: 8),
-                  child: SizedBox(
-                    width: 20,
-                    height: 20,
-                    child: CircularProgressIndicator(strokeWidth: 2),
-                  ),
+              if (wide)
+                Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: <Widget>[
+                    Expanded(
+                      flex: 5,
+                      child: Column(
+                        children: <Widget>[
+                          _buildCreateRoomCard(game),
+                          const SizedBox(height: 12),
+                          _buildJoinByCodeCard(game),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      flex: 6,
+                      child: _buildPublicRoomsCard(game),
+                    ),
+                  ],
+                )
+              else
+                Column(
+                  children: <Widget>[
+                    _buildCreateRoomCard(game),
+                    const SizedBox(height: 12),
+                    _buildPublicRoomsCard(game),
+                    const SizedBox(height: 12),
+                    _buildJoinByCodeCard(game),
+                  ],
                 ),
             ],
           ),
-        ],
-      ),
+        );
+      },
     );
   }
 
-  Widget _buildCreateRoomPanel() {
-    return _glassPanel(
+  Widget _buildCreateRoomCard(GameController game) {
+    return _panel(
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: <Widget>[
           _sectionTitle('Создать комнату', icon: Icons.add_home_work_rounded),
-          const SizedBox(height: 12),
+          const SizedBox(height: 10),
           TextField(
-            controller: _packageIdController,
-            decoration: const InputDecoration(
-              labelText: 'UUID пакета вопросов',
-              hintText: '22222222-2222-2222-2222-222222222222',
+            controller: _packageSearchController,
+            textCapitalization: TextCapitalization.sentences,
+            decoration: InputDecoration(
+              labelText: 'Поиск пакета (название/автор)',
+              suffixIcon: IconButton(
+                tooltip: 'Найти',
+                onPressed: game.isBusy ? null : () => _refreshPackages(game),
+                icon: const Icon(Icons.search_rounded),
+              ),
             ),
+            onSubmitted: (_) => _refreshPackages(game),
           ),
+          const SizedBox(height: 10),
+          _buildDifficultySelector(game),
+          const SizedBox(height: 10),
+          Container(
+            width: double.infinity,
+            constraints: const BoxConstraints(minHeight: 96, maxHeight: 210),
+            padding: const EdgeInsets.all(8),
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(14),
+              color: const Color(0x1AFFFFFF),
+              border: Border.all(color: AppPalette.border),
+            ),
+            child: game.availablePackages.isEmpty
+                ? Center(
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: <Widget>[
+                        Text(
+                          'Пакеты не найдены. Попробуй изменить запрос или фильтр.',
+                          textAlign: TextAlign.center,
+                          style:
+                              Theme.of(context).textTheme.bodySmall?.copyWith(
+                                    color: AppPalette.textMuted,
+                                  ),
+                        ),
+                        const SizedBox(height: 10),
+                        OutlinedButton.icon(
+                          onPressed: game.isBusy
+                              ? null
+                              : () => _resetPackageFilters(game),
+                          icon: const Icon(Icons.restart_alt_rounded, size: 18),
+                          label: const Text('Сбросить фильтры'),
+                        ),
+                      ],
+                    ),
+                  )
+                : ListView.separated(
+                    itemCount: game.availablePackages.length,
+                    separatorBuilder: (_, __) => const SizedBox(height: 6),
+                    itemBuilder: (BuildContext context, int index) {
+                      final package = game.availablePackages[index];
+                      final bool selected =
+                          game.selectedPackageId == package.id;
+
+                      return InkWell(
+                        borderRadius: BorderRadius.circular(10),
+                        onTap: game.isBusy
+                            ? null
+                            : () => game.setSelectedPackage(package.id),
+                        child: Container(
+                          padding: const EdgeInsets.fromLTRB(10, 8, 8, 8),
+                          decoration: BoxDecoration(
+                            borderRadius: BorderRadius.circular(10),
+                            color: selected
+                                ? const Color(0x334A7BFF)
+                                : const Color(0x14000000),
+                            border: Border.all(
+                              color: selected
+                                  ? const Color(0xAA4A7BFF)
+                                  : AppPalette.border,
+                            ),
+                          ),
+                          child: Row(
+                            children: <Widget>[
+                              Icon(
+                                selected
+                                    ? Icons.radio_button_checked_rounded
+                                    : Icons.radio_button_unchecked_rounded,
+                                color: selected
+                                    ? AppPalette.accent
+                                    : AppPalette.textMuted,
+                              ),
+                              const SizedBox(width: 10),
+                              Expanded(
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: <Widget>[
+                                    Text(
+                                      package.title,
+                                      maxLines: 2,
+                                      overflow: TextOverflow.ellipsis,
+                                      style: Theme.of(context)
+                                          .textTheme
+                                          .bodyMedium
+                                          ?.copyWith(
+                                            fontWeight: FontWeight.w700,
+                                          ),
+                                    ),
+                                    const SizedBox(height: 2),
+                                    Text(
+                                      '${package.authorName} · ${_difficultyLabel(package.difficulty)} · ${package.questionsCount} вопросов',
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                      style: Theme.of(context)
+                                          .textTheme
+                                          .bodySmall
+                                          ?.copyWith(
+                                            color: AppPalette.textMuted,
+                                          ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      );
+                    },
+                  ),
+          ),
+          if (game.packagesUpdatedAt != null) ...<Widget>[
+            const SizedBox(height: 8),
+            Text(
+              'Пакеты обновлены: ${_formatTime(game.packagesUpdatedAt!)}',
+              style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                    color: AppPalette.textMuted,
+                  ),
+            ),
+          ],
           const SizedBox(height: 12),
           Text(
             'Тип комнаты',
@@ -313,24 +658,60 @@ class _HomeScreenState extends State<HomeScreen> {
             runSpacing: 8,
             children: <Widget>[
               ChoiceChip(
-                label: const Text('Закрытая (по коду)'),
-                selected: _controller.createRoomVisibility == 'PRIVATE',
-                onSelected: _controller.isBusy
+                label: const Text('Закрытая'),
+                selected: game.createRoomVisibility == 'PRIVATE',
+                onSelected: game.isBusy
                     ? null
                     : (bool selected) {
                         if (selected) {
-                          _controller.setCreateRoomVisibility('PRIVATE');
+                          game.setCreateRoomVisibility('PRIVATE');
                         }
                       },
               ),
               ChoiceChip(
                 label: const Text('Публичная'),
-                selected: _controller.createRoomVisibility == 'PUBLIC',
-                onSelected: _controller.isBusy
+                selected: game.createRoomVisibility == 'PUBLIC',
+                onSelected: game.isBusy
                     ? null
                     : (bool selected) {
                         if (selected) {
-                          _controller.setCreateRoomVisibility('PUBLIC');
+                          game.setCreateRoomVisibility('PUBLIC');
+                        }
+                      },
+              ),
+            ],
+          ),
+          const SizedBox(height: 12),
+          Text(
+            'Фальстарты',
+            style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                  color: AppPalette.textMuted,
+                ),
+          ),
+          const SizedBox(height: 8),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: <Widget>[
+              ChoiceChip(
+                label: const Text('Включены'),
+                selected: game.createRoomAllowFalseStarts,
+                onSelected: game.isBusy
+                    ? null
+                    : (bool selected) {
+                        if (selected) {
+                          game.setCreateRoomAllowFalseStarts(true);
+                        }
+                      },
+              ),
+              ChoiceChip(
+                label: const Text('Выключены'),
+                selected: !game.createRoomAllowFalseStarts,
+                onSelected: game.isBusy
+                    ? null
+                    : (bool selected) {
+                        if (selected) {
+                          game.setCreateRoomAllowFalseStarts(false);
                         }
                       },
               ),
@@ -340,13 +721,9 @@ class _HomeScreenState extends State<HomeScreen> {
           SizedBox(
             width: double.infinity,
             child: FilledButton(
-              onPressed: _controller.isBusy
+              onPressed: game.isBusy || game.selectedPackageId == null
                   ? null
-                  : () => _controller.createRoom(
-                        packageId: _packageIdController.text.trim(),
-                        displayName: _displayNameController.text.trim(),
-                        visibility: _controller.createRoomVisibility,
-                      ),
+                  : () => _createRoom(game),
               child: const Text('Создать'),
             ),
           ),
@@ -355,8 +732,125 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  Widget _buildJoinRoomPanel() {
-    return _glassPanel(
+  Widget _buildDifficultySelector(GameController game) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: <Widget>[
+        Text(
+          'Сложность пакета',
+          style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                color: AppPalette.textMuted,
+              ),
+        ),
+        const SizedBox(height: 8),
+        Wrap(
+          spacing: 8,
+          runSpacing: 8,
+          children: <Widget>[
+            _buildDifficultyTile(
+              game: game,
+              value: null,
+              title: 'Любая',
+              subtitle: 'Без фильтра',
+              icon: Icons.all_inclusive_rounded,
+            ),
+            _buildDifficultyTile(
+              game: game,
+              value: 1,
+              title: 'Легкая',
+              subtitle: 'Разминка',
+              icon: Icons.eco_rounded,
+            ),
+            _buildDifficultyTile(
+              game: game,
+              value: 2,
+              title: 'Средняя',
+              subtitle: 'Баланс',
+              icon: Icons.flare_rounded,
+            ),
+            _buildDifficultyTile(
+              game: game,
+              value: 3,
+              title: 'Сложная',
+              subtitle: 'Хардкор',
+              icon: Icons.local_fire_department_rounded,
+            ),
+          ],
+        ),
+      ],
+    );
+  }
+
+  Widget _buildDifficultyTile({
+    required GameController game,
+    required int? value,
+    required String title,
+    required String subtitle,
+    required IconData icon,
+  }) {
+    final bool selected = _packageDifficultyFilter == value;
+    final Color borderColor = selected ? AppPalette.accent : AppPalette.border;
+    final Color bgColor =
+        selected ? const Color(0x334A7BFF) : const Color(0x1AFFFFFF);
+
+    return InkWell(
+      borderRadius: BorderRadius.circular(12),
+      onTap: game.isBusy
+          ? null
+          : () {
+              setState(() {
+                _packageDifficultyFilter = value;
+              });
+              _refreshPackages(game);
+            },
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 180),
+        width: 132,
+        padding: const EdgeInsets.fromLTRB(10, 9, 10, 9),
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(color: borderColor),
+          color: bgColor,
+        ),
+        child: Row(
+          children: <Widget>[
+            Icon(
+              icon,
+              size: 18,
+              color: selected ? AppPalette.accent : AppPalette.textMuted,
+            ),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: <Widget>[
+                  Text(
+                    title,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: Theme.of(context).textTheme.labelLarge?.copyWith(
+                          fontWeight: FontWeight.w700,
+                        ),
+                  ),
+                  Text(
+                    subtitle,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                          color: AppPalette.textMuted,
+                        ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildPublicRoomsCard(GameController game) {
+    return _panel(
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: <Widget>[
@@ -364,27 +858,64 @@ class _HomeScreenState extends State<HomeScreen> {
             children: <Widget>[
               Expanded(
                 child: _sectionTitle(
-                  'Присоединиться',
-                  icon: Icons.group_add_rounded,
+                  'Найти публичную комнату',
+                  icon: Icons.travel_explore_rounded,
                 ),
               ),
               IconButton(
-                tooltip: 'Обновить публичные комнаты',
-                onPressed: _controller.isBusy
-                    ? null
-                    : () => _controller.refreshPublicRooms(),
+                tooltip: 'Обновить',
+                onPressed: game.isBusy ? null : () => _refreshPublicRooms(game),
                 icon: const Icon(Icons.refresh_rounded),
               ),
             ],
           ),
-          if (_controller.publicRoomsUpdatedAt != null)
+          if (game.publicRoomsUpdatedAt != null)
             Text(
-              'Публичные комнаты обновлены: ${_formatTime(_controller.publicRoomsUpdatedAt!)}',
+              'Обновлено: ${_formatTime(game.publicRoomsUpdatedAt!)}',
               style: Theme.of(context).textTheme.bodySmall?.copyWith(
                     color: AppPalette.textMuted,
                   ),
             ),
-          const SizedBox(height: 12),
+          const SizedBox(height: 8),
+          if (game.publicRooms.isEmpty)
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                borderRadius: BorderRadius.circular(14),
+                color: const Color(0x1AFFFFFF),
+                border: Border.all(color: AppPalette.border),
+              ),
+              child: Text(
+                'Список пуст. Нажми обновить и попробуй снова.',
+                style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                      color: AppPalette.textMuted,
+                    ),
+              ),
+            )
+          else
+            Column(
+              children: game.publicRooms
+                  .map(
+                    (PublicRoomView room) => _buildPublicRoomTile(
+                      game: game,
+                      room: room,
+                    ),
+                  )
+                  .toList(),
+            ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildJoinByCodeCard(GameController game) {
+    return _panel(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: <Widget>[
+          _sectionTitle('Найти комнату по коду', icon: Icons.pin_rounded),
+          const SizedBox(height: 10),
           TextField(
             controller: _roomCodeController,
             textCapitalization: TextCapitalization.characters,
@@ -397,197 +928,332 @@ class _HomeScreenState extends State<HomeScreen> {
           SizedBox(
             width: double.infinity,
             child: FilledButton.tonal(
-              onPressed: _controller.isBusy
-                  ? null
-                  : () => _controller.joinRoom(
-                        roomCode: _roomCodeController.text.trim(),
-                        displayName: _displayNameController.text.trim(),
-                      ),
-              child: const Text('Войти в комнату'),
+              onPressed: game.isBusy ? null : () => _joinByCode(game),
+              child: const Text('Войти по коду'),
             ),
           ),
-          const SizedBox(height: 14),
+          const SizedBox(height: 10),
           Text(
-            'Публичные комнаты',
-            style: Theme.of(context).textTheme.titleSmall?.copyWith(
-                  fontWeight: FontWeight.w700,
+            game.statusMessage,
+            style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                  color: AppPalette.textMuted,
                 ),
           ),
-          const SizedBox(height: 8),
-          if (_controller.publicRooms.isEmpty)
-            Text(
-              'Список пуст. Нажми обновить, чтобы загрузить доступные комнаты.',
-              style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                    color: AppPalette.textMuted,
-                    height: 1.3,
-                  ),
-            )
-          else
-            Column(
-              children: _controller.publicRooms
-                  .map((PublicRoomView room) => _buildPublicRoomTile(room))
-                  .toList(),
-            ),
         ],
       ),
     );
   }
 
-  Widget _buildPublicRoomTile(PublicRoomView room) {
-    return Container(
-      margin: const EdgeInsets.only(bottom: 8),
-      padding: const EdgeInsets.all(10),
-      decoration: BoxDecoration(
-        borderRadius: BorderRadius.circular(14),
-        color: const Color(0x1AFFFFFF),
-        border: Border.all(color: AppPalette.border),
-      ),
-      child: Row(
+  Widget _buildGameStage(GameController game, RoomStateView roomState) {
+    final double keyboardInset = MediaQuery.of(context).viewInsets.bottom;
+
+    return AnimatedPadding(
+      duration: const Duration(milliseconds: 180),
+      curve: Curves.easeOut,
+      padding: EdgeInsets.fromLTRB(16, 14, 16, 12 + keyboardInset),
+      child: Column(
         children: <Widget>[
           Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: <Widget>[
-                Text(
-                  '${room.roomCode} · ${room.hostName}',
-                  style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                        fontWeight: FontWeight.w700,
-                      ),
+            flex: 4,
+            child: _buildGameTopBoardCard(game, roomState),
+          ),
+          const SizedBox(height: 10),
+          Expanded(
+            flex: 4,
+            child: _buildPlayersCard(game, roomState.players),
+          ),
+          const SizedBox(height: 10),
+          _buildGameAnswerBar(game, roomState),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildGameTopBoardCard(GameController game, RoomStateView roomState) {
+    final QuestionView? question = roomState.currentQuestion;
+    final String topic = _topicLabel(question);
+    final int serverNowMs = _nowMs + game.offsetMs;
+    final String phaseHint = _questionPhaseHint(roomState, serverNowMs);
+    final bool shouldShowAnswer = roomState.status == 'QUESTION_CLOSED' &&
+        question != null &&
+        question.answerDisplay.trim().isNotEmpty;
+
+    return _panel(
+      padding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: <Widget>[
+          Row(
+            children: <Widget>[
+              Expanded(
+                child: Text(
+                  topic,
+                  style: _headlineFont(
+                    size: 19,
+                    weight: FontWeight.w800,
+                    letterSpacing: 0.2,
+                  ),
                 ),
-                const SizedBox(height: 2),
-                Text(
-                  '${room.playersCount}/${room.maxPlayers} игроков · ${_humanStatus(room.status)}',
+              ),
+              _statusPill(
+                _humanStatus(roomState.status),
+                _statusColor(roomState.status),
+              ),
+              const SizedBox(width: 6),
+              IconButton(
+                tooltip: 'Выйти из комнаты',
+                onPressed: game.isBusy ? null : game.leaveRoom,
+                icon: const Icon(Icons.close_rounded),
+              ),
+            ],
+          ),
+          Row(
+            children: <Widget>[
+              Expanded(
+                child: Text(
+                  'Комната ${roomState.roomCode}',
                   style: Theme.of(context).textTheme.bodySmall?.copyWith(
                         color: AppPalette.textMuted,
                       ),
                 ),
-              ],
+              ),
+              TextButton.icon(
+                onPressed: () => _copyRoomCode(roomState.roomCode),
+                icon: const Icon(Icons.copy_rounded, size: 16),
+                label: const Text('Копировать'),
+              ),
+            ],
+          ),
+          const SizedBox(height: 4),
+          Row(
+            children: <Widget>[
+              _statusPill(
+                roomState.allowFalseStarts ? 'ФАЛЬСТАРТЫ ON' : 'ФАЛЬСТАРТЫ OFF',
+                roomState.allowFalseStarts
+                    ? AppPalette.warning
+                    : const Color(0xFF8FA6FF),
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  phaseHint,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                        color: AppPalette.textMuted,
+                      ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          Expanded(
+            child: Container(
+              width: double.infinity,
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                borderRadius: BorderRadius.circular(14),
+                color: const Color(0x2236A3FF),
+                border: Border.all(color: AppPalette.border),
+              ),
+              child: Align(
+                alignment: Alignment.topLeft,
+                child: _buildAnimatedPrompt(game, roomState, question),
+              ),
             ),
           ),
-          const SizedBox(width: 10),
-          FilledButton.tonal(
-            onPressed: _controller.isBusy || !room.hasFreeSlots
-                ? null
-                : () {
-                    _roomCodeController.text = room.roomCode;
-                    _controller.joinPublicRoom(
-                      roomCode: room.roomCode,
-                      displayName: _displayNameController.text.trim(),
-                    );
-                  },
-            child: Text(room.hasFreeSlots ? 'Войти' : 'Заполнена'),
-          ),
+          if (shouldShowAnswer) ...<Widget>[
+            const SizedBox(height: 8),
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+              decoration: BoxDecoration(
+                borderRadius: BorderRadius.circular(12),
+                color: const Color(0x2535D39A),
+                border: Border.all(color: const Color(0x9953DDB0)),
+              ),
+              child: Text(
+                'Правильный ответ: ${question.answerDisplay}',
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+                style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                      fontWeight: FontWeight.w700,
+                    ),
+              ),
+            ),
+          ],
+          const SizedBox(height: 8),
+          _buildHostRoundControl(game, roomState),
         ],
       ),
     );
   }
 
-  Widget _buildGameLayout(RoomStateView roomState, double width) {
-    final Widget arenaColumn = Column(
-      children: <Widget>[
-        _buildQuestionArena(roomState),
-        const SizedBox(height: 12),
-        _buildLogsPanel(),
-      ],
-    );
+  String _topicLabel(QuestionView? question) {
+    if (question == null) {
+      return 'ТЕМА';
+    }
 
-    final Widget sideColumn = Column(
-      children: <Widget>[
-        _buildRoomPanel(roomState),
-        const SizedBox(height: 12),
-        _buildQuestionPicker(roomState),
-        const SizedBox(height: 12),
-        _buildPlayersPanel(roomState.players),
-      ],
-    );
+    if (question.roundNo == 1) {
+      final String? kraftTopic = _kraftTopicsByRow[question.boardRow];
+      if (kraftTopic != null) {
+        return kraftTopic;
+      }
+    }
 
-    if (width > 980) {
-      return Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: <Widget>[
-          Expanded(flex: 11, child: arenaColumn),
-          const SizedBox(width: 12),
-          Expanded(flex: 8, child: sideColumn),
-        ],
+    if (question.boardRow > 0) {
+      return 'ТЕМА ${question.boardRow}';
+    }
+
+    return 'ТЕМА';
+  }
+
+  Widget _buildHostRoundControl(GameController game, RoomStateView roomState) {
+    if (!game.isHost) {
+      return const SizedBox.shrink();
+    }
+
+    if (roomState.status == 'LOBBY') {
+      return SizedBox(
+        width: double.infinity,
+        child: FilledButton.tonal(
+          onPressed: game.isBusy ? null : game.startGame,
+          child: const Text('Начать игру'),
+        ),
       );
     }
 
-    return Column(
-      children: <Widget>[
-        arenaColumn,
-        const SizedBox(height: 12),
-        sideColumn,
-      ],
-    );
+    if (roomState.status == 'QUESTION_CLOSED' &&
+        roomState.remainingQuestionIds.isNotEmpty) {
+      return SizedBox(
+        width: double.infinity,
+        child: FilledButton.tonal(
+          onPressed: game.isBusy ? null : game.selectNextQuestion,
+          child: const Text('Открыть следующий вопрос'),
+        ),
+      );
+    }
+
+    return const SizedBox.shrink();
   }
 
-  Widget _buildQuestionArena(RoomStateView roomState) {
-    final QuestionView? question = roomState.currentQuestion;
-    final bool buzzEnabled = roomState.isQuestionOpen && !_controller.isBusy;
+  Widget _buildGameAnswerBar(GameController game, RoomStateView roomState) {
+    final PlayerView? self = _findSelfPlayer(game, roomState);
+    final int serverNowMs = _nowMs + game.offsetMs;
+    final int? buzzOpenAtMs = roomState.buzzOpenAtServerMs;
+    final int? buzzCloseAtMs = roomState.buzzCloseAtServerMs;
+    final bool hasQuestion = roomState.currentQuestion != null;
+    final bool inQuestionOpen =
+        roomState.status == 'QUESTION_OPEN' && hasQuestion;
+    final bool inReading =
+        inQuestionOpen && buzzOpenAtMs != null && serverNowMs < buzzOpenAtMs;
+    final bool withinBuzzWindow = inQuestionOpen &&
+        buzzOpenAtMs != null &&
+        buzzCloseAtMs != null &&
+        serverNowMs >= buzzOpenAtMs &&
+        serverNowMs <= buzzCloseAtMs;
+    final bool beforeBuzzClose =
+        inQuestionOpen && buzzCloseAtMs != null && serverNowMs <= buzzCloseAtMs;
+    final bool selfCanBuzz = self?.canBuzz ?? false;
+    final bool legacyWindowActive = beforeBuzzClose && buzzOpenAtMs == null;
 
-    return _glassPanel(
+    final bool buzzEnabled = !game.isBusy &&
+        selfCanBuzz &&
+        hasQuestion &&
+        (withinBuzzWindow ||
+            (inReading && roomState.allowFalseStarts) ||
+            legacyWindowActive);
+
+    final bool submitEnabled = !game.isBusy &&
+        hasQuestion &&
+        roomState.status == 'ANSWERING' &&
+        roomState.activeAnswerUserId == game.selfUserId;
+
+    String buttonLabel = 'КНОПКА';
+    String hint = 'Ждите начала вопроса';
+    bool buttonWarn = false;
+
+    if (roomState.status == 'ANSWERING') {
+      if (roomState.activeAnswerUserId == game.selfUserId) {
+        buttonLabel = 'ОТВЕЧАЙ';
+        hint = 'Введи ответ в поле ниже';
+      } else {
+        buttonLabel = 'ОТВЕЧАЕТ ИГРОК';
+        hint = 'Кнопка временно недоступна';
+      }
+    } else if (inReading) {
+      final int msLeft = (buzzOpenAtMs - serverNowMs).clamp(0, 60 * 1000);
+      if (roomState.allowFalseStarts) {
+        buttonLabel = 'ФАЛЬСТАРТ';
+        hint =
+            'До кнопки ${_secondsLeft(msLeft)} c. Раннее нажатие = блокировка на вопрос.';
+        buttonWarn = true;
+      } else {
+        buttonLabel = 'ЧТЕНИЕ...';
+        hint = 'До кнопки ${_secondsLeft(msLeft)} c';
+      }
+    } else if (withinBuzzWindow) {
+      final int msLeft = (buzzCloseAtMs - serverNowMs).clamp(0, 60 * 1000);
+      buttonLabel = 'ЖМИ!';
+      hint = 'Окно кнопки: осталось ${_secondsLeft(msLeft)} c';
+    } else if (!selfCanBuzz && inQuestionOpen) {
+      buttonLabel = 'БЛОКИРОВКА';
+      hint = 'Ты не можешь нажимать кнопку в этом вопросе';
+    } else if (roomState.status == 'QUESTION_CLOSED') {
+      buttonLabel = 'ОЖИДАНИЕ';
+      hint = roomState.remainingQuestionIds.isEmpty
+          ? 'Игра завершена'
+          : 'Ведущий открывает следующий вопрос';
+    }
+
+    return _panel(
+      padding: const EdgeInsets.fromLTRB(12, 12, 12, 12),
       child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
         children: <Widget>[
-          _sectionTitle('Игровая арена', icon: Icons.bolt_rounded),
-          const SizedBox(height: 12),
-          Container(
-            width: double.infinity,
-            padding: const EdgeInsets.all(14),
-            decoration: BoxDecoration(
-              borderRadius: BorderRadius.circular(16),
-              color: const Color(0x333AA6FF),
-              border: Border.all(color: AppPalette.border),
-            ),
-            child: question == null
-                ? Text(
-                    'Хост выбирает вопрос. Когда вопрос откроется, жми BUZZER.',
-                    style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                          color: AppPalette.textMuted,
-                          height: 1.35,
-                        ),
-                  )
-                : Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: <Widget>[
-                      _statusPill(
-                        '${question.points} pts',
-                        AppPalette.warning,
-                      ),
-                      const SizedBox(height: 10),
-                      Text(
-                        question.prompt,
-                        style:
-                            Theme.of(context).textTheme.titleMedium?.copyWith(
-                                  fontWeight: FontWeight.w700,
-                                  height: 1.3,
-                                ),
-                      ),
-                    ],
-                  ),
+          _buildMainActionButton(
+            enabled: buzzEnabled,
+            onTap: game.buzz,
+            label: buttonLabel,
+            warning: buttonWarn,
           ),
-          const SizedBox(height: 14),
-          _buildBuzzerButton(enabled: buzzEnabled),
-          const SizedBox(height: 14),
+          const SizedBox(height: 10),
+          Align(
+            alignment: Alignment.centerLeft,
+            child: Text(
+              hint,
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+              style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                    color: AppPalette.textMuted,
+                  ),
+            ),
+          ),
+          const SizedBox(height: 8),
           Row(
             children: <Widget>[
               Expanded(
                 child: TextField(
                   controller: _answerController,
+                  enabled: submitEnabled,
+                  onSubmitted: (_) {
+                    if (!submitEnabled) {
+                      return;
+                    }
+                    game.submitAnswer(_answerController.text.trim());
+                  },
                   decoration: const InputDecoration(
                     labelText: 'Твой ответ',
-                    hintText: 'Введи текстовый ответ',
+                    hintText: 'Введи текст ответа',
                   ),
                 ),
               ),
-              const SizedBox(width: 8),
+              const SizedBox(width: 10),
               FilledButton(
-                onPressed: _controller.isBusy
-                    ? null
-                    : () => _controller.submitAnswer(
-                          _answerController.text.trim(),
-                        ),
-                child: const Text('Отправить'),
+                onPressed: submitEnabled
+                    ? () => game.submitAnswer(_answerController.text.trim())
+                    : null,
+                child: const Text('Ответить'),
               ),
             ],
           ),
@@ -596,15 +1262,22 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  Widget _buildBuzzerButton({required bool enabled}) {
-    final Color left =
-        enabled ? const Color(0xFF35D39A) : const Color(0xFF2A355D);
-    final Color right =
-        enabled ? const Color(0xFF2EC8FF) : const Color(0xFF2A355D);
+  Widget _buildMainActionButton({
+    required bool enabled,
+    required VoidCallback onTap,
+    required String label,
+    bool warning = false,
+  }) {
+    final Color left = enabled
+        ? (warning ? const Color(0xFFE2862F) : const Color(0xFF35D39A))
+        : const Color(0xFF2A355D);
+    final Color right = enabled
+        ? (warning ? const Color(0xFFD74B4B) : const Color(0xFF2EC8FF))
+        : const Color(0xFF2A355D);
 
     return AnimatedOpacity(
       duration: const Duration(milliseconds: 180),
-      opacity: enabled ? 1 : 0.62,
+      opacity: enabled ? 1 : 0.58,
       child: Container(
         width: double.infinity,
         decoration: BoxDecoration(
@@ -618,9 +1291,9 @@ class _HomeScreenState extends State<HomeScreen> {
             BoxShadow(
               color: (enabled ? AppPalette.accent : Colors.transparent)
                   .withValues(alpha: 0.35),
-              blurRadius: 24,
+              blurRadius: 26,
               spreadRadius: -10,
-              offset: const Offset(0, 14),
+              offset: const Offset(0, 15),
             ),
           ],
         ),
@@ -628,21 +1301,20 @@ class _HomeScreenState extends State<HomeScreen> {
           color: Colors.transparent,
           child: InkWell(
             borderRadius: BorderRadius.circular(18),
-            onTap: enabled ? _controller.buzz : null,
+            onTap: enabled ? onTap : null,
             child: Padding(
-              padding: const EdgeInsets.symmetric(vertical: 18),
+              padding: const EdgeInsets.symmetric(vertical: 14),
               child: Row(
                 mainAxisAlignment: MainAxisAlignment.center,
                 children: <Widget>[
-                  const Icon(Icons.sensors_rounded, color: Colors.white),
+                  const Icon(Icons.bolt_rounded, color: Colors.white),
                   const SizedBox(width: 10),
                   Text(
-                    'BUZZER',
-                    style: GoogleFonts.sora(
-                      fontSize: 24,
-                      fontWeight: FontWeight.w800,
-                      color: Colors.white,
-                      letterSpacing: 0.8,
+                    label,
+                    style: _headlineFont(
+                      size: 20,
+                      weight: FontWeight.w800,
+                      letterSpacing: 0.7,
                     ),
                   ),
                 ],
@@ -654,170 +1326,202 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  Widget _buildRoomPanel(RoomStateView roomState) {
-    return _glassPanel(
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: <Widget>[
-          _sectionTitle('Комната', icon: Icons.meeting_room_rounded),
-          const SizedBox(height: 12),
-          Row(
-            children: <Widget>[
-              Expanded(
-                child: Text(
-                  roomState.roomCode,
-                  style: GoogleFonts.sora(
-                    fontSize: 22,
-                    fontWeight: FontWeight.w800,
-                    color: Colors.white,
-                    letterSpacing: 1.2,
-                  ),
-                ),
-              ),
-              IconButton(
-                onPressed: () async {
-                  await Clipboard.setData(
-                      ClipboardData(text: roomState.roomCode));
-                  if (!mounted) {
-                    return;
-                  }
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    const SnackBar(content: Text('Код комнаты скопирован')),
-                  );
-                },
-                icon: const Icon(Icons.copy_rounded),
-                tooltip: 'Копировать код',
-              ),
-            ],
+  String _questionPhaseHint(RoomStateView roomState, int serverNowMs) {
+    if (roomState.status == 'QUESTION_OPEN') {
+      final int? openAtMs = roomState.buzzOpenAtServerMs;
+      final int? closeAtMs = roomState.buzzCloseAtServerMs;
+      if (openAtMs != null && serverNowMs < openAtMs) {
+        return 'Чтение вопроса: ${_secondsLeft(openAtMs - serverNowMs)} c';
+      }
+      if (closeAtMs != null && serverNowMs <= closeAtMs) {
+        return 'Окно кнопки: ${_secondsLeft(closeAtMs - serverNowMs)} c';
+      }
+      return 'Окно кнопки закрыто';
+    }
+
+    if (roomState.status == 'ANSWERING') {
+      return 'Игрок отвечает';
+    }
+
+    if (roomState.status == 'QUESTION_CLOSED') {
+      return roomState.remainingQuestionIds.isEmpty
+          ? 'Игра завершена'
+          : 'Ожидание следующего вопроса';
+    }
+
+    if (roomState.status == 'LOBBY') {
+      return 'Ожидание старта игры';
+    }
+
+    return '';
+  }
+
+  Widget _buildAnimatedPrompt(
+    GameController game,
+    RoomStateView roomState,
+    QuestionView? question,
+  ) {
+    final TextStyle baseStyle =
+        Theme.of(context).textTheme.titleMedium?.copyWith(
+                  fontWeight: FontWeight.w700,
+                  height: 1.3,
+                ) ??
+            const TextStyle(
+              fontSize: 18,
+              fontWeight: FontWeight.w700,
+              height: 1.3,
+              color: Colors.white,
+            );
+
+    if (question == null) {
+      return Text(
+        'Ожидание вопроса. Ведущий запускает игру и открывает следующий вопрос.',
+        maxLines: 7,
+        overflow: TextOverflow.ellipsis,
+        style: baseStyle,
+      );
+    }
+
+    final int textLength = question.prompt.length;
+    if (textLength == 0) {
+      return Text(
+        'Вопрос пуст.',
+        style: baseStyle,
+      );
+    }
+
+    final int serverNowMs = _nowMs + game.offsetMs;
+    final int? readStartMs = roomState.readStartedAtServerMs;
+    final int? readEndMs = roomState.readEndsAtServerMs;
+    int visibleChars = textLength;
+
+    if (roomState.status == 'QUESTION_OPEN' &&
+        readStartMs != null &&
+        readEndMs != null &&
+        readEndMs > readStartMs) {
+      if (serverNowMs <= readStartMs) {
+        visibleChars = 0;
+      } else if (serverNowMs >= readEndMs) {
+        visibleChars = textLength;
+      } else {
+        final double progress =
+            (serverNowMs - readStartMs) / (readEndMs - readStartMs);
+        visibleChars = (textLength * progress).floor().clamp(0, textLength);
+      }
+    }
+
+    if (visibleChars >= textLength) {
+      return Text(
+        question.prompt,
+        maxLines: 7,
+        overflow: TextOverflow.ellipsis,
+        style: baseStyle,
+      );
+    }
+
+    final String revealed = question.prompt.substring(0, visibleChars);
+    final String hidden = question.prompt.substring(visibleChars);
+
+    return RichText(
+      maxLines: 7,
+      overflow: TextOverflow.ellipsis,
+      text: TextSpan(
+        children: <InlineSpan>[
+          TextSpan(
+            text: revealed,
+            style: baseStyle.copyWith(color: Colors.white),
           ),
-          const SizedBox(height: 4),
-          Wrap(
-            spacing: 8,
-            runSpacing: 8,
-            children: <Widget>[
-              _statusPill(
-                _humanStatus(roomState.status),
-                _statusColor(roomState.status),
-              ),
-              _statusPill(
-                roomState.visibility == 'PUBLIC' ? 'Публичная' : 'Закрытая',
-                roomState.visibility == 'PUBLIC'
-                    ? const Color(0xFF5CCBFF)
-                    : const Color(0xFF8FA6FF),
-              ),
-            ],
-          ),
-          const SizedBox(height: 12),
-          Wrap(
-            spacing: 8,
-            runSpacing: 8,
-            children: <Widget>[
-              if (_controller.isHost)
-                FilledButton.icon(
-                  onPressed: _controller.isBusy ? null : _controller.startGame,
-                  icon: const Icon(Icons.play_arrow_rounded, size: 18),
-                  label: const Text('Старт'),
-                ),
-              OutlinedButton.icon(
-                onPressed: _controller.isBusy ? null : _controller.syncTime,
-                icon: const Icon(Icons.schedule_rounded, size: 18),
-                label: const Text('Синхронизация'),
-              ),
-              OutlinedButton.icon(
-                onPressed: _controller.isBusy ? null : _controller.leaveRoom,
-                icon: const Icon(Icons.exit_to_app_rounded, size: 18),
-                label: const Text('Выйти'),
-              ),
-            ],
+          TextSpan(
+            text: hidden,
+            style: baseStyle.copyWith(
+              color: Colors.white.withValues(alpha: 0.32),
+            ),
           ),
         ],
       ),
     );
   }
 
-  Widget _buildQuestionPicker(RoomStateView roomState) {
-    final List<String> quickIds =
-        roomState.remainingQuestionIds.take(10).toList();
+  PlayerView? _findSelfPlayer(GameController game, RoomStateView roomState) {
+    final String? selfId = game.selfUserId;
+    if (selfId == null) {
+      return null;
+    }
 
-    return _glassPanel(
+    for (final PlayerView player in roomState.players) {
+      if (player.userId == selfId) {
+        return player;
+      }
+    }
+
+    return null;
+  }
+
+  String _secondsLeft(int ms) {
+    final int secs = ((ms.clamp(0, 60 * 1000) + 999) / 1000).floor();
+    return secs.toString();
+  }
+
+  Widget _buildPlayersCard(GameController game, List<PlayerView> players) {
+    return _panel(
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: <Widget>[
-          _sectionTitle('Выбор вопроса', icon: Icons.grid_view_rounded),
-          const SizedBox(height: 8),
-          Text(
-            'Осталось: ${roomState.remainingQuestionIds.length}',
-            style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                  color: AppPalette.textMuted,
-                ),
-          ),
+          _sectionTitle('Игроки и счёт', icon: Icons.groups_2_rounded),
           const SizedBox(height: 10),
-          Row(
-            children: <Widget>[
-              Expanded(
-                child: TextField(
-                  controller: _questionIdController,
-                  decoration: const InputDecoration(
-                    labelText: 'UUID вопроса',
-                  ),
-                ),
-              ),
-              const SizedBox(width: 8),
-              FilledButton(
-                onPressed: _controller.isBusy
-                    ? null
-                    : () => _controller.selectQuestion(
-                          _questionIdController.text.trim(),
-                        ),
-                child: const Text('Открыть'),
-              ),
-            ],
-          ),
-          if (quickIds.isNotEmpty) ...<Widget>[
-            const SizedBox(height: 10),
-            Wrap(
-              spacing: 6,
-              runSpacing: 6,
-              children: quickIds
-                  .map(
-                    (String id) => ActionChip(
-                      label: Text(_shortQuestionId(id)),
-                      onPressed: _controller.isBusy
-                          ? null
-                          : () {
-                              _questionIdController.text = id;
-                              _controller.selectQuestion(id);
-                            },
+          Expanded(
+            child: players.isEmpty
+                ? Center(
+                    child: Text(
+                      'Пока нет игроков',
+                      style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                            color: AppPalette.textMuted,
+                          ),
                     ),
                   )
-                  .toList(),
-            ),
-          ],
+                : LayoutBuilder(
+                    builder:
+                        (BuildContext context, BoxConstraints constraints) {
+                      const double spacing = 8;
+                      final int columns = players.length <= 4 ? 1 : 2;
+                      final int rows = (players.length / columns).ceil();
+                      final double availableHeight =
+                          constraints.maxHeight - spacing * (rows - 1);
+                      final double availableWidth =
+                          constraints.maxWidth - spacing * (columns - 1);
+                      final double tileHeight =
+                          (availableHeight > 1 ? availableHeight : 1) / rows;
+                      final double tileWidth =
+                          (availableWidth > 1 ? availableWidth : 1) / columns;
+                      final double aspectRatio = tileWidth / tileHeight;
+
+                      return GridView.builder(
+                        physics: const NeverScrollableScrollPhysics(),
+                        padding: EdgeInsets.zero,
+                        gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+                          crossAxisCount: columns,
+                          crossAxisSpacing: spacing,
+                          mainAxisSpacing: spacing,
+                          childAspectRatio: aspectRatio,
+                        ),
+                        itemCount: players.length,
+                        itemBuilder: (BuildContext context, int index) {
+                          return _buildPlayerTile(game, index, players[index]);
+                        },
+                      );
+                    },
+                  ),
+          ),
         ],
       ),
     );
   }
 
-  Widget _buildPlayersPanel(List<PlayerView> players) {
-    return _glassPanel(
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: <Widget>[
-          _sectionTitle('Лидерборд', icon: Icons.emoji_events_rounded),
-          const SizedBox(height: 10),
-          for (int index = 0; index < players.length; index += 1)
-            _buildPlayerTile(index, players[index]),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildPlayerTile(int rank, PlayerView player) {
-    final bool isMe = player.userId == _controller.selfUserId;
+  Widget _buildPlayerTile(GameController game, int rank, PlayerView player) {
+    final bool isMe = player.userId == game.selfUserId;
 
     return Container(
-      margin: const EdgeInsets.only(bottom: 8),
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
       decoration: BoxDecoration(
         borderRadius: BorderRadius.circular(14),
         color: isMe ? const Color(0x334A7BFF) : const Color(0x1AFFFFFF),
@@ -855,10 +1559,16 @@ class _HomeScreenState extends State<HomeScreen> {
                       ),
                 ),
                 Text(
-                  player.connected ? 'online' : 'offline',
+                  player.connected
+                      ? (player.canBuzz
+                          ? 'online · can buzz'
+                          : 'online · locked')
+                      : 'offline',
                   style: Theme.of(context).textTheme.bodySmall?.copyWith(
                         color: player.connected
-                            ? AppPalette.success
+                            ? (player.canBuzz
+                                ? AppPalette.success
+                                : AppPalette.warning)
                             : AppPalette.textMuted,
                       ),
                 ),
@@ -867,69 +1577,116 @@ class _HomeScreenState extends State<HomeScreen> {
           ),
           Text(
             '${player.score}',
-            style: GoogleFonts.sora(
-              fontSize: 18,
-              fontWeight: FontWeight.w700,
-              color: Colors.white,
-            ),
+            style: _headlineFont(size: 17),
           ),
         ],
       ),
     );
   }
 
-  Widget _buildLogsPanel() {
-    return _glassPanel(
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
+  Widget _buildPublicRoomTile({
+    required GameController game,
+    required PublicRoomView room,
+  }) {
+    return Container(
+      margin: const EdgeInsets.only(bottom: 8),
+      padding: const EdgeInsets.all(10),
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(14),
+        color: const Color(0x1AFFFFFF),
+        border: Border.all(color: AppPalette.border),
+      ),
+      child: Row(
         children: <Widget>[
-          GestureDetector(
-            onTap: () {
-              setState(() {
-                _logsExpanded = !_logsExpanded;
-              });
-            },
-            child: Row(
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
               children: <Widget>[
-                _sectionTitle('События', icon: Icons.receipt_long_rounded),
-                const Spacer(),
-                Icon(
-                  _logsExpanded
-                      ? Icons.keyboard_arrow_up_rounded
-                      : Icons.keyboard_arrow_down_rounded,
+                Text(
+                  '${room.roomCode} · ${room.hostName}',
+                  style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                        fontWeight: FontWeight.w700,
+                      ),
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  '${room.playersCount}/${room.maxPlayers} игроков · ${_humanStatus(room.status)}',
+                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                        color: AppPalette.textMuted,
+                      ),
                 ),
               ],
             ),
           ),
-          if (_logsExpanded) ...<Widget>[
-            const SizedBox(height: 10),
-            if (_controller.logs.isEmpty)
-              Text(
-                'Событий пока нет',
-                style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                      color: AppPalette.textMuted,
-                    ),
-              )
-            else
-              ..._controller.logs.take(12).map(
-                    (String line) => Padding(
-                      padding: const EdgeInsets.only(bottom: 6),
-                      child: Text(
-                        line,
-                        style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                              color: AppPalette.textMuted,
-                              height: 1.25,
-                            ),
-                      ),
-                    ),
-                  ),
-          ],
+          const SizedBox(width: 10),
+          FilledButton.tonal(
+            onPressed: game.isBusy || !room.hasFreeSlots
+                ? null
+                : () {
+                    _roomCodeController.text = room.roomCode;
+                    game.joinPublicRoom(
+                      roomCode: room.roomCode,
+                      displayName: _profile!.nickname,
+                    );
+                  },
+            child: Text(room.hasFreeSlots ? 'Войти' : 'Заполнена'),
+          ),
         ],
       ),
     );
   }
 
-  Widget _glassPanel({
+  Widget _buildBackground() {
+    return Container(
+      decoration: const BoxDecoration(
+        gradient: LinearGradient(
+          colors: <Color>[
+            Color(0xFF060B1A),
+            Color(0xFF08133A),
+            Color(0xFF0B1B4A),
+          ],
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+        ),
+      ),
+      child: Stack(
+        children: <Widget>[
+          Positioned(
+            top: -120,
+            right: -80,
+            child: _glowOrb(280, const Color(0xAA4A7BFF)),
+          ),
+          Positioned(
+            bottom: -130,
+            left: -90,
+            child: _glowOrb(260, const Color(0xAA27D5FF)),
+          ),
+          Positioned(
+            top: 320,
+            left: 190,
+            child: _glowOrb(130, const Color(0x6648B8FF)),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _glowOrb(double size, Color color) {
+    return IgnorePointer(
+      child: Container(
+        width: size,
+        height: size,
+        decoration: BoxDecoration(
+          shape: BoxShape.circle,
+          gradient: RadialGradient(
+            colors: <Color>[color, color.withValues(alpha: 0)],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _panel({
     required Widget child,
     EdgeInsetsGeometry padding = const EdgeInsets.all(16),
   }) {
@@ -959,14 +1716,7 @@ class _HomeScreenState extends State<HomeScreen> {
       children: <Widget>[
         Icon(icon, size: 19, color: AppPalette.accent),
         const SizedBox(width: 8),
-        Text(
-          text,
-          style: GoogleFonts.sora(
-            fontSize: 16,
-            fontWeight: FontWeight.w700,
-            color: Colors.white,
-          ),
-        ),
+        Text(text, style: _headlineFont(size: 16)),
       ],
     );
   }
@@ -990,7 +1740,7 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  Widget _metricPill(String label, String value) {
+  Widget _statChip(String label, String value) {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 7),
       decoration: BoxDecoration(
@@ -1019,11 +1769,174 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  String _shortQuestionId(String id) {
-    if (id.length <= 8) {
-      return id;
+  TextStyle _headlineFont({
+    required double size,
+    FontWeight weight = FontWeight.w700,
+    double letterSpacing = 0,
+    Color color = Colors.white,
+  }) {
+    return TextStyle(
+      fontFamily: 'Avenir Next',
+      fontSize: size,
+      fontWeight: weight,
+      color: color,
+      letterSpacing: letterSpacing,
+    );
+  }
+
+  Future<void> _registerProfile() async {
+    final String nickname = _registrationNicknameController.text.trim();
+    if (nickname.isEmpty) {
+      _showMessage('Введите никнейм.');
+      return;
     }
-    return id.substring(0, 8).toUpperCase();
+
+    setState(() {
+      _isRegistering = true;
+    });
+
+    try {
+      final PlayerProfile profile = await _profileStore.registerProfile(
+        nickname: nickname,
+      );
+
+      if (!mounted) {
+        return;
+      }
+
+      _attachController(profile);
+
+      setState(() {
+        _profile = profile;
+        _stage = _HomeStage.start;
+      });
+    } catch (error) {
+      _showMessage('Не удалось зарегистрироваться: $error');
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isRegistering = false;
+        });
+      }
+    }
+  }
+
+  Future<void> _logout() async {
+    final GameController? game = _controller;
+    if (game != null) {
+      try {
+        await game.leaveRoom();
+      } catch (_) {
+        // ignore
+      }
+    }
+
+    _disposeController();
+    await _profileStore.clearProfile();
+
+    if (!mounted) {
+      return;
+    }
+
+    setState(() {
+      _profile = null;
+      _stage = _HomeStage.start;
+      _packageSearchController.clear();
+      _packageDifficultyFilter = null;
+      _roomCodeController.clear();
+      _answerController.clear();
+      _registrationNicknameController.clear();
+    });
+  }
+
+  Future<void> _enterLobby(GameController game) async {
+    final PlayerProfile? profile = _profile;
+    if (profile == null) {
+      return;
+    }
+
+    await game.ensureConnected(profile.nickname);
+    await game.refreshPublicRooms();
+    await game.refreshPackages(
+      query: _packageSearchController.text.trim(),
+      difficulty: _packageDifficultyFilter,
+    );
+
+    if (!mounted) {
+      return;
+    }
+    setState(() {
+      _stage = _HomeStage.lobby;
+    });
+  }
+
+  Future<void> _refreshPublicRooms(GameController game) async {
+    await game.refreshPublicRooms();
+  }
+
+  Future<void> _refreshPackages(GameController game) async {
+    await game.refreshPackages(
+      query: _packageSearchController.text.trim(),
+      difficulty: _packageDifficultyFilter,
+    );
+  }
+
+  Future<void> _resetPackageFilters(GameController game) async {
+    setState(() {
+      _packageDifficultyFilter = null;
+      _packageSearchController.clear();
+    });
+    await _refreshPackages(game);
+  }
+
+  Future<void> _createRoom(GameController game) async {
+    final PlayerProfile? profile = _profile;
+    if (profile == null) {
+      return;
+    }
+
+    final String? packageId = game.selectedPackageId;
+    if (packageId == null || packageId.isEmpty) {
+      _showMessage('Выберите пакет вопросов.');
+      return;
+    }
+
+    await game.createRoom(
+      packageId: packageId,
+      displayName: profile.nickname,
+      visibility: game.createRoomVisibility,
+    );
+  }
+
+  Future<void> _joinByCode(GameController game) async {
+    final PlayerProfile? profile = _profile;
+    if (profile == null) {
+      return;
+    }
+
+    await game.joinRoom(
+      roomCode: _roomCodeController.text.trim(),
+      displayName: profile.nickname,
+    );
+  }
+
+  Future<void> _copyRoomCode(String roomCode) async {
+    try {
+      await Clipboard.setData(ClipboardData(text: roomCode));
+      _showMessage('Код комнаты $roomCode скопирован');
+    } catch (_) {
+      _showMessage('Не удалось скопировать код комнаты');
+    }
+  }
+
+  void _showMessage(String message) {
+    if (!mounted) {
+      return;
+    }
+
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(message)),
+    );
   }
 
   String _formatTime(DateTime value) {
@@ -1031,6 +1944,19 @@ class _HomeScreenState extends State<HomeScreen> {
     final String minute = value.minute.toString().padLeft(2, '0');
     final String second = value.second.toString().padLeft(2, '0');
     return '$hour:$minute:$second';
+  }
+
+  String _difficultyLabel(int difficulty) {
+    switch (difficulty) {
+      case 1:
+        return 'легкая';
+      case 2:
+        return 'средняя';
+      case 3:
+        return 'сложная';
+      default:
+        return 'сложность $difficulty';
+    }
   }
 
   String _humanStatus(String status) {

@@ -84,6 +84,50 @@ const fetchAppliedMigrations = async (pool: Pool): Promise<Set<string>> => {
   return new Set(result.rows.map((row) => row.filename));
 };
 
+const maybeBaselineInitMigration = async (
+  pool: Pool,
+  applied: Set<string>,
+  pending: string[],
+): Promise<string[]> => {
+  const initMigrationName = "001_init.sql";
+  if (applied.size > 0 || !pending.includes(initMigrationName)) {
+    return pending;
+  }
+
+  const result = await pool.query<{
+    users: string | null;
+    quizPackages: string | null;
+    questions: string | null;
+  }>(
+    `
+      SELECT
+        to_regclass('public.users') AS users,
+        to_regclass('public.quiz_packages') AS "quizPackages",
+        to_regclass('public.questions') AS questions
+    `,
+  );
+
+  const row = result.rows[0];
+  const hasExistingSchema = Boolean(
+    row?.users && row?.quizPackages && row?.questions,
+  );
+
+  if (!hasExistingSchema) {
+    return pending;
+  }
+
+  await pool.query(
+    `INSERT INTO ${MIGRATIONS_TABLE} (filename) VALUES ($1) ON CONFLICT (filename) DO NOTHING;`,
+    [initMigrationName],
+  );
+
+  console.log(
+    `[migrations] Baseline detected existing schema, marking ${initMigrationName} as applied.`,
+  );
+
+  return pending.filter((fileName) => fileName !== initMigrationName);
+};
+
 const applyMigration = async (
   pool: Pool,
   migrationFileName: string,
@@ -114,7 +158,8 @@ const run = async (): Promise<void> => {
     await ensureMigrationsTable(pool);
     const allFiles = await readMigrationFiles(withSeed);
     const applied = await fetchAppliedMigrations(pool);
-    const pending = allFiles.filter((fileName) => !applied.has(fileName));
+    let pending = allFiles.filter((fileName) => !applied.has(fileName));
+    pending = await maybeBaselineInitMigration(pool, applied, pending);
 
     if (pending.length === 0) {
       console.log("[migrations] No pending migrations.");

@@ -1,5 +1,10 @@
 import { Pool } from "pg";
-import { AcceptedAnswerRow, QuizPackageSummary, QuizQuestionRow } from "../types/quiz.js";
+import {
+  AcceptedAnswerRow,
+  QuizPackageCatalogItem,
+  QuizPackageSummary,
+  QuizQuestionRow,
+} from "../types/quiz.js";
 
 export class QuizRepository {
   constructor(private readonly pool: Pool) {}
@@ -56,6 +61,53 @@ export class QuizRepository {
         ORDER BY round_no ASC, board_row ASC, board_col ASC
       `,
       [packageId],
+    );
+
+    return result.rows;
+  }
+
+  async listPublishedPackages(options?: {
+    query?: string;
+    difficulty?: number;
+    limit?: number;
+  }): Promise<QuizPackageCatalogItem[]> {
+    const query = options?.query?.trim() || null;
+    const difficulty = options?.difficulty ?? null;
+    const limit = Math.max(1, Math.min(options?.limit ?? 20, 50));
+
+    const result = await this.pool.query<QuizPackageCatalogItem>(
+      `
+        SELECT
+          p.id,
+          p.title,
+          p.language_code AS "languageCode",
+          p.is_published AS "isPublished",
+          p.author_name AS "authorName",
+          p.difficulty,
+          COUNT(q.id)::int AS "questionsCount"
+        FROM quiz_packages p
+        LEFT JOIN questions q ON q.package_id = p.id
+        WHERE p.is_published = TRUE
+          AND p.visibility = 'public'
+          AND (
+            $1::text IS NULL
+            OR p.title ILIKE '%' || $1 || '%'
+            OR p.author_name ILIKE '%' || $1 || '%'
+          )
+          AND ($2::smallint IS NULL OR p.difficulty = $2)
+        GROUP BY p.id
+        HAVING COUNT(q.id) >= 20
+          AND COUNT(q.id) <= 40
+          AND COUNT(DISTINCT q.round_no) = 1
+          AND MIN(q.round_no) = 1
+          AND COUNT(DISTINCT q.board_row) BETWEEN 4 AND 8
+          AND COUNT(q.id) = COUNT(DISTINCT q.board_row) * 5
+          AND COUNT(*) FILTER (WHERE q.board_col BETWEEN 1 AND 5) = COUNT(q.id)
+          AND COUNT(DISTINCT (q.board_row, q.board_col)) = COUNT(q.id)
+        ORDER BY p.updated_at DESC, p.created_at DESC
+        LIMIT $3
+      `,
+      [query, difficulty, limit],
     );
 
     return result.rows;

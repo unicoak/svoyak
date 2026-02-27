@@ -46,6 +46,10 @@ export interface BuzzerAttempt {
 
 export interface Buzzer {
   state: BuzzerState;
+  readStartedAtServerMs: number | null;
+  readEndsAtServerMs: number | null;
+  openAtServerMs: number | null;
+  closeAtServerMs: number | null;
   openedAtServerMs: number | null;
   resolveAtServerMs: number | null;
   winnerUserId: string | null;
@@ -73,7 +77,9 @@ export interface RoomSettings {
   maxPlayers: number;
   disconnectGraceMs: number;
   buzzResolveWindowMs: number;
+  buzzWindowMs: number;
   defaultAnswerTimeLimitMs: number;
+  allowFalseStarts: boolean;
 }
 
 export interface RoomState {
