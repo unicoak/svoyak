@@ -1,0 +1,62 @@
+{
+  "schemaVersion": 1,
+  "version": 1,
+  "roomId": "7f5e1c66-7f4f-4a7c-9f4b-4fd79cfdb1f8",
+  "code": "AB12CD",
+  "visibility": "PRIVATE",
+  "status": "LOBBY",
+  "hostUserId": "4ef8d5f1-9c4f-4f8b-b3df-47d5f76c5f7c",
+  "packageId": "f89f55e2-c87d-4203-9f77-bdb6261f6f0f",
+  "createdAtMs": 1760000000000,
+  "updatedAtMs": 1760000000000,
+  "settings": {
+    "maxPlayers": 6,
+    "disconnectGraceMs": 30000,
+    "buzzResolveWindowMs": 80,
+    "defaultAnswerTimeLimitMs": 5000
+  },
+  "players": {
+    "4ef8d5f1-9c4f-4f8b-b3df-47d5f76c5f7c": {
+      "userId": "4ef8d5f1-9c4f-4f8b-b3df-47d5f76c5f7c",
+      "name": "Host",
+      "socketId": "vQ8x...",
+      "score": 0,
+      "joinedAtMs": 1760000000000,
+      "lastSeenAtMs": 1760000000123,
+      "connected": true,
+      "isHost": true,
+      "canBuzz": true,
+      "reconnectToken": "16f91685-0cff-4bf7-b8e0-f9dc108d9f53",
+      "net": {
+        "offsetMs": -6,
+        "rttMs": 48,
+        "jitterMs": 7,
+        "syncSampleCount": 12,
+        "lastSyncAtMs": 1760000000100
+      }
+    }
+  },
+  "game": {
+    "roundNo": 1,
+    "board": {
+      "remainingQuestionIds": [],
+      "playedQuestionIds": []
+    },
+    "currentQuestion": null,
+    "buzzer": {
+      "state": "CLOSED",
+      "openedAtServerMs": null,
+      "resolveAtServerMs": null,
+      "winnerUserId": null,
+      "lockedOutUserIds": [],
+      "attempts": []
+    },
+    "answering": {
+      "activeUserId": null,
+      "deadlineServerMs": null
+    }
+  },
+  "migration": {
+    "hostMigrationSeq": 0
+  }
+}

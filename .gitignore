@@ -1,0 +1,20 @@
+# Node
+node_modules
+backend/node_modules
+backend/dist
+
+# Env
+.env
+backend/.env
+
+# Flutter / Dart
+.dart_tool
+.packages
+build
+ios/Pods
+android/.gradle
+
+# IDE
+.DS_Store
+.idea
+.vscode

@@ -1,0 +1,16 @@
+.git
+.idea
+.dart_tool
+.vscode
+
+**/node_modules
+**/dist
+**/build
+
+mobile/ios/Pods
+mobile/ios/.symlinks
+mobile/.flutter-plugins
+mobile/.flutter-plugins-dependencies
+
+**/.env
+**/.DS_Store
