@@ -130,9 +130,10 @@ interface PackageStructureValidation {
   orderedQuestionIds?: string[];
 }
 
-const QUESTION_REVEAL_MIN_MS = 1_800;
-const QUESTION_REVEAL_MAX_MS = 9_000;
-const QUESTION_REVEAL_PER_CHAR_MS = 34;
+// Slower reveal pace: exactly 2x slower vs previous settings.
+const QUESTION_REVEAL_MIN_MS = 3_600;
+const QUESTION_REVEAL_MAX_MS = 18_000;
+const QUESTION_REVEAL_PER_CHAR_MS = 68;
 const ANSWER_INPUT_WINDOW_MS = 15_000;
 const CORRECT_ANSWER_REVEAL_MS = 10_000;
 const EARLY_PRESS_TOLERANCE_MS = 35;
@@ -925,6 +926,34 @@ export class GameGateway {
         const acceptedAnswers = await this.quizRepository.getAcceptedAnswers(payload.questionId);
 
         const outcome = await this.roomStore.withRoomLock(payload.roomCode, async (room) => {
+          if (room.status === "QUESTION_OPEN") {
+            if (room.game.currentQuestion?.id !== payload.questionId) {
+              throw new Error("QUESTION_MISMATCH");
+            }
+
+            const resolveAtServerMs = room.game.buzzer.resolveAtServerMs;
+            if (
+              room.game.buzzer.attempts.length > 0 &&
+              resolveAtServerMs != null &&
+              Date.now() >= resolveAtServerMs
+            ) {
+              const sortedAttempts = [...room.game.buzzer.attempts].sort(
+                (a, b) =>
+                  a.effectivePressMs - b.effectivePressMs ||
+                  a.recvServerMs - b.recvServerMs ||
+                  a.userId.localeCompare(b.userId),
+              );
+              const winner = sortedAttempts[0];
+              if (winner.userId === socket.data.userId) {
+                lockBuzzerWinner(room, winner.userId);
+              } else {
+                throw new Error("NOT_ACTIVE_ANSWERER");
+              }
+            } else {
+              throw new Error("WAIT_FOR_BUZZ_LOCK");
+            }
+          }
+
           if (room.status !== "ANSWERING") {
             throw new Error("NOT_IN_ANSWERING_STATE");
           }
@@ -2192,9 +2221,9 @@ export class GameGateway {
       }
     }
 
-    // Fixed order for gameplay: by difficulty column first, then by theme row.
-    for (let col = 1; col <= 5; col += 1) {
-      for (const rowNumber of orderedRows) {
+    // Gameplay order: full theme first (10->50), then next theme.
+    for (const rowNumber of orderedRows) {
+      for (let col = 1; col <= 5; col += 1) {
         const question = byRow.get(rowNumber)?.get(col);
         if (!question) {
           return { valid: false, reason: "Each theme must contain exactly 5 questions." };

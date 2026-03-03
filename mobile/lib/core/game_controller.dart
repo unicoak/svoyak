@@ -303,27 +303,72 @@ class GameController extends ChangeNotifier {
   Future<void> submitAnswer(String answerText) async {
     final code = roomCode;
     final currentQuestionId = roomState?.currentQuestion?.id;
+    final normalizedAnswer = answerText.trim();
 
-    if (code == null ||
-        currentQuestionId == null ||
-        answerText.trim().isEmpty) {
+    if (code == null || currentQuestionId == null || normalizedAnswer.isEmpty) {
       return;
     }
 
     await _runAction(() async {
-      await _socketService.submitAnswer(
-        roomCode: code,
-        questionId: currentQuestionId,
-        answerText: answerText,
-      );
-      _appendLog('answer_submitted sent');
+      Future<void> sendAnswer({required String logLabel}) async {
+        await _socketService.submitAnswer(
+          roomCode: code,
+          questionId: currentQuestionId,
+          answerText: normalizedAnswer,
+        );
+        _appendLog(logLabel);
+      }
+
+      try {
+        await sendAnswer(logLabel: 'answer_submitted sent');
+      } on SocketAckException catch (error) {
+        final bool retryable = error.code == 'WAIT_FOR_BUZZ_LOCK' ||
+            error.code == 'NOT_IN_ANSWERING_STATE';
+        if (!retryable) {
+          rethrow;
+        }
+
+        SocketAckException lastError = error;
+        for (int attempt = 0; attempt < 2; attempt += 1) {
+          await Future<void>.delayed(
+            Duration(milliseconds: 180 * (attempt + 1)),
+          );
+
+          final latestState = roomState;
+          final latestQuestionId = latestState?.currentQuestion?.id;
+          final String? latestStatus = latestState?.status;
+          if (latestQuestionId != currentQuestionId ||
+              latestStatus == 'QUESTION_CLOSED' ||
+              latestStatus == 'FINISHED') {
+            throw lastError;
+          }
+
+          try {
+            await sendAnswer(
+                logLabel: 'answer_submitted retry #${attempt + 1}');
+            return;
+          } on SocketAckException catch (retryError) {
+            final bool stillRetryable =
+                retryError.code == 'WAIT_FOR_BUZZ_LOCK' ||
+                    retryError.code == 'NOT_IN_ANSWERING_STATE';
+            if (!stillRetryable) {
+              rethrow;
+            }
+            lastError = retryError;
+          }
+        }
+
+        throw lastError;
+      }
     }, errorPrefix: 'Submit answer failed');
   }
 
   void updateAnswerDraft(String answerText) {
     final code = roomCode;
     final currentQuestionId = roomState?.currentQuestion?.id;
-    if (code == null || currentQuestionId == null || currentQuestionId.isEmpty) {
+    if (code == null ||
+        currentQuestionId == null ||
+        currentQuestionId.isEmpty) {
       return;
     }
 
@@ -334,7 +379,8 @@ class GameController extends ChangeNotifier {
     }
 
     final String normalized = answerText.trim();
-    if (_lastDraftQuestionId == currentQuestionId && _lastDraftSent == normalized) {
+    if (_lastDraftQuestionId == currentQuestionId &&
+        _lastDraftSent == normalized) {
       return;
     }
     _lastDraftQuestionId = currentQuestionId;
@@ -690,8 +736,12 @@ class GameController extends ChangeNotifier {
         return 'Попытка уже засчитана.';
       case 'QUESTION_MISMATCH':
         return 'Неверный вопрос в запросе.';
+      case 'NOT_IN_ANSWERING_STATE':
+        return 'Сейчас нельзя отправить ответ. Попробуй снова.';
       case 'NOT_ACTIVE_ANSWERER':
         return 'Сейчас отвечает другой игрок.';
+      case 'WAIT_FOR_BUZZ_LOCK':
+        return 'Подожди долю секунды: система определяет, кто нажал первым.';
       default:
         return 'Ошибка: $code';
     }

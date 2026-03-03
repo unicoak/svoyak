@@ -1182,6 +1182,7 @@ class _HomeScreenState extends State<HomeScreen> {
     final double? answerProgress = showAnswerProgress
         ? (answerMsLeft / _answerWindowMs).clamp(0, 1).toDouble()
         : null;
+    double? buttonProgress = answerProgress;
 
     String buttonLabel = 'КНОПКА';
     String hint = 'Ждите начала вопроса';
@@ -1199,36 +1200,53 @@ class _HomeScreenState extends State<HomeScreen> {
       }
     } else if (inReading) {
       final int msLeft = (buzzOpenAtMs - serverNowMs).clamp(0, 60 * 1000);
+      final int readTotalMs = roomState.readStartedAtServerMs != null
+          ? (buzzOpenAtMs - roomState.readStartedAtServerMs!)
+              .clamp(1, 60 * 1000)
+          : msLeft.clamp(1, 60 * 1000);
+      buttonProgress = (msLeft / readTotalMs).clamp(0, 1).toDouble();
       if (roomState.allowFalseStarts) {
-        buttonLabel = 'ФАЛЬСТАРТ';
-        hint =
-            'До кнопки ${_secondsLeft(msLeft)} c. Раннее нажатие = блокировка на вопрос.';
+        buttonLabel = 'ФАЛЬСТАРТ ${_secondsLeft(msLeft)}с';
+        hint = 'Раннее нажатие = блокировка на вопрос';
         buttonWarn = true;
       } else {
-        buttonLabel = 'ЖМИ В ЛЮБОЙ МОМЕНТ';
+        buttonLabel = 'ЖМИ ${_secondsLeft(msLeft)}с';
         hint = 'Можно нажимать уже во время чтения вопроса';
       }
     } else if (withinBuzzWindow) {
       final int msLeft = (buzzCloseAtMs - serverNowMs).clamp(0, 60 * 1000);
+      final int openMs = buzzOpenAtMs;
+      final int windowTotalMs = (buzzCloseAtMs - openMs).clamp(1, 60 * 1000);
+      buttonProgress = (msLeft / windowTotalMs).clamp(0, 1).toDouble();
       if (roomState.allowFalseStarts) {
-        buttonLabel = 'МОЖНО НАЖИМАТЬ';
+        buttonLabel = 'МОЖНО ${_secondsLeft(msLeft)}с';
       } else {
-        buttonLabel = readingInProgress ? 'ЖМИ В ЛЮБОЙ МОМЕНТ' : 'ЖМИ!';
+        buttonLabel = readingInProgress
+            ? 'ЖМИ ${_secondsLeft(msLeft)}с'
+            : 'ЖМИ! ${_secondsLeft(msLeft)}с';
       }
-      hint = 'Окно кнопки: осталось ${_secondsLeft(msLeft)} c';
+      hint = 'Окно кнопки активно';
     } else if (!selfCanBuzz && inQuestionOpen) {
       buttonLabel = 'БЛОКИРОВКА';
       hint = 'Ты не можешь нажимать кнопку в этом вопросе';
+      buttonProgress = null;
     } else if (roomState.status == 'QUESTION_CLOSED') {
       buttonLabel = 'ОЖИДАНИЕ';
       final int? autoNextAtMs = roomState.autoNextQuestionAtServerMs;
       if (roomState.remainingQuestionIds.isEmpty) {
         hint = 'Игра завершена';
+        buttonProgress = null;
       } else if (autoNextAtMs != null && serverNowMs < autoNextAtMs) {
-        hint = 'Показ ответа: ${_secondsLeft(autoNextAtMs - serverNowMs)} c';
+        final int msLeft = (autoNextAtMs - serverNowMs).clamp(0, 60 * 1000);
+        buttonLabel = 'ОЖИДАНИЕ ${_secondsLeft(msLeft)}с';
+        buttonProgress = (msLeft / 10000).clamp(0, 1).toDouble();
+        hint = 'Показ правильного ответа';
       } else {
         hint = 'Ведущий открывает следующий вопрос';
+        buttonProgress = null;
       }
+    } else {
+      buttonProgress = null;
     }
 
     return _panel(
@@ -1241,7 +1259,7 @@ class _HomeScreenState extends State<HomeScreen> {
             onTap: game.buzz,
             label: buttonLabel,
             warning: buttonWarn,
-            progress: answerProgress,
+            progress: buttonProgress,
           ),
           const SizedBox(height: 10),
           Align(
