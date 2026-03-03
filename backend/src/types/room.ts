@@ -32,7 +32,11 @@ export interface QuestionSnapshot {
   points: number;
   prompt: string;
   answerDisplay: string;
+  answerComment: string;
   answerTimeLimitMs: number;
+  revealDurationMs?: number;
+  revealedMs?: number;
+  revealResumedAtServerMs?: number | null;
 }
 
 export interface BuzzerAttempt {
@@ -60,6 +64,9 @@ export interface Buzzer {
 export interface Answering {
   activeUserId: string | null;
   deadlineServerMs: number | null;
+  draftAnswerText: string;
+  pausedReadRemainingMs: number | null;
+  pausedCloseRemainingMs: number | null;
 }
 
 export interface GameState {
@@ -69,6 +76,7 @@ export interface GameState {
     playedQuestionIds: string[];
   };
   currentQuestion: QuestionSnapshot | null;
+  autoNextQuestionAtServerMs: number | null;
   buzzer: Buzzer;
   answering: Answering;
 }

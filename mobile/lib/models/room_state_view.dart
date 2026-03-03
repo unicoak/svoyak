@@ -35,7 +35,11 @@ class QuestionView {
     required this.boardCol,
     required this.prompt,
     required this.answerDisplay,
+    required this.answerComment,
     required this.points,
+    required this.revealDurationMs,
+    required this.revealedMs,
+    required this.revealResumedAtServerMs,
   });
 
   final String id;
@@ -44,9 +48,16 @@ class QuestionView {
   final int boardCol;
   final String prompt;
   final String answerDisplay;
+  final String answerComment;
   final int points;
+  final int revealDurationMs;
+  final int revealedMs;
+  final int? revealResumedAtServerMs;
 
   factory QuestionView.fromMap(Map<String, dynamic> raw) {
+    final int fallbackRevealDurationMs =
+        (((raw['prompt']?.toString() ?? '').length * 34).clamp(1800, 9000))
+            .toInt();
     return QuestionView(
       id: raw['id']?.toString() ?? '',
       roundNo: (raw['roundNo'] as num?)?.toInt() ?? 1,
@@ -54,7 +65,13 @@ class QuestionView {
       boardCol: (raw['boardCol'] as num?)?.toInt() ?? 0,
       prompt: raw['prompt']?.toString() ?? '',
       answerDisplay: raw['answerDisplay']?.toString() ?? '',
+      answerComment: raw['answerComment']?.toString() ?? '',
       points: (raw['points'] as num?)?.toInt() ?? 0,
+      revealDurationMs: (raw['revealDurationMs'] as num?)?.toInt() ??
+          fallbackRevealDurationMs,
+      revealedMs: (raw['revealedMs'] as num?)?.toInt() ?? 0,
+      revealResumedAtServerMs:
+          (raw['revealResumedAtServerMs'] as num?)?.toInt(),
     );
   }
 }
@@ -70,11 +87,13 @@ class RoomStateView {
     required this.playedQuestionIds,
     this.currentQuestion,
     this.activeAnswerUserId,
+    this.answerDeadlineServerMs,
     this.readStartedAtServerMs,
     this.readEndsAtServerMs,
     this.buzzOpenAtServerMs,
     this.buzzCloseAtServerMs,
-    this.buzzWindowMs = 5000,
+    this.autoNextQuestionAtServerMs,
+    this.buzzWindowMs = 7000,
     this.allowFalseStarts = true,
   });
 
@@ -87,10 +106,12 @@ class RoomStateView {
   final List<String> playedQuestionIds;
   final QuestionView? currentQuestion;
   final String? activeAnswerUserId;
+  final int? answerDeadlineServerMs;
   final int? readStartedAtServerMs;
   final int? readEndsAtServerMs;
   final int? buzzOpenAtServerMs;
   final int? buzzCloseAtServerMs;
+  final int? autoNextQuestionAtServerMs;
   final int buzzWindowMs;
   final bool allowFalseStarts;
 
@@ -147,11 +168,14 @@ class RoomStateView {
       playedQuestionIds: _asStringList(board['playedQuestionIds']),
       currentQuestion: currentQuestion,
       activeAnswerUserId: answering['activeUserId']?.toString(),
+      answerDeadlineServerMs: (answering['deadlineServerMs'] as num?)?.toInt(),
       readStartedAtServerMs: (buzzer['readStartedAtServerMs'] as num?)?.toInt(),
       readEndsAtServerMs: (buzzer['readEndsAtServerMs'] as num?)?.toInt(),
       buzzOpenAtServerMs: (buzzer['openAtServerMs'] as num?)?.toInt(),
       buzzCloseAtServerMs: (buzzer['closeAtServerMs'] as num?)?.toInt(),
-      buzzWindowMs: (settings['buzzWindowMs'] as num?)?.toInt() ?? 5000,
+      autoNextQuestionAtServerMs:
+          (game['autoNextQuestionAtServerMs'] as num?)?.toInt(),
+      buzzWindowMs: (settings['buzzWindowMs'] as num?)?.toInt() ?? 7000,
       allowFalseStarts: settings['allowFalseStarts'] as bool? ?? true,
     );
   }

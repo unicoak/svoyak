@@ -17,6 +17,15 @@ class SocketAckException implements Exception {
   String toString() => 'SocketAckException($code): $message';
 }
 
+class SocketConnectionException implements Exception {
+  SocketConnectionException(this.message);
+
+  final String message;
+
+  @override
+  String toString() => message;
+}
+
 class GameSocketService {
   GameSocketService(this.serverUrl);
 
@@ -71,11 +80,18 @@ class GameSocketService {
 
     _socket!.onConnectError((error) {
       if (!completer.isCompleted) {
-        completer.completeError(StateError('Connection error: $error'));
+        completer.completeError(
+          SocketConnectionException('Connection error: $error'),
+        );
       }
     });
 
     _socket!.onError((error) {
+      if (!completer.isCompleted) {
+        completer.completeError(
+          SocketConnectionException('Socket error: $error'),
+        );
+      }
       _eventsController.add(
         SocketEventEnvelope(event: 'error', payload: error),
       );
@@ -88,7 +104,13 @@ class GameSocketService {
     });
 
     _socket!.connect();
-    await completer.future.timeout(const Duration(seconds: 8));
+    try {
+      await completer.future.timeout(const Duration(seconds: 8));
+    } on TimeoutException {
+      throw SocketConnectionException(
+        'Connection timeout: server did not respond in time.',
+      );
+    }
   }
 
   Future<void> disconnect() async {
@@ -188,6 +210,23 @@ class GameSocketService {
     });
   }
 
+  void emitAnswerDraft({
+    required String roomCode,
+    required String questionId,
+    required String answerText,
+  }) {
+    final socket = _socket;
+    if (socket == null || !socket.connected) {
+      return;
+    }
+
+    socket.emit('answer_draft', <String, dynamic>{
+      'roomCode': roomCode,
+      'questionId': questionId,
+      'answerText': answerText,
+    });
+  }
+
   Future<Map<String, dynamic>> syncTime({
     required String sampleId,
     required int t0ClientMs,
@@ -232,7 +271,7 @@ class GameSocketService {
   ) async {
     final socket = _socket;
     if (socket == null || !socket.connected) {
-      throw StateError('Socket is not connected');
+      throw SocketConnectionException('Socket is not connected');
     }
 
     final completer = Completer<Map<String, dynamic>>();

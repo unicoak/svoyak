@@ -52,9 +52,10 @@ export class QuizRepository {
           round_no AS "roundNo",
           board_row AS "boardRow",
           board_col AS "boardCol",
-          points,
+          LEAST(50, GREATEST(10, board_col * 10))::int AS points,
           prompt,
           answer_display AS "answerDisplay",
+          answer_comment AS "answerComment",
           answer_time_limit_ms AS "answerTimeLimitMs"
         FROM questions
         WHERE package_id = $1
@@ -121,9 +122,10 @@ export class QuizRepository {
           round_no AS "roundNo",
           board_row AS "boardRow",
           board_col AS "boardCol",
-          points,
+          LEAST(50, GREATEST(10, board_col * 10))::int AS points,
           prompt,
           answer_display AS "answerDisplay",
+          answer_comment AS "answerComment",
           answer_time_limit_ms AS "answerTimeLimitMs"
         FROM questions
         WHERE id = $1

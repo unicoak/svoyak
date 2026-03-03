@@ -1,5 +1,8 @@
 import { QuestionSnapshot, RoomState } from "../types/room.js";
 
+const clamp = (value: number, min: number, max: number): number =>
+  Math.max(min, Math.min(max, value));
+
 export const resetBuzzerState = (room: RoomState, state: "CLOSED" | "OPEN" | "LOCKED"): void => {
   room.game.buzzer.state = state;
   room.game.buzzer.readStartedAtServerMs = null;
@@ -14,12 +17,22 @@ export const resetBuzzerState = (room: RoomState, state: "CLOSED" | "OPEN" | "LO
   if (state !== "LOCKED") {
     room.game.answering.activeUserId = null;
     room.game.answering.deadlineServerMs = null;
+    room.game.answering.draftAnswerText = "";
+    room.game.answering.pausedReadRemainingMs = null;
+    room.game.answering.pausedCloseRemainingMs = null;
   }
 };
 
 export const openQuestion = (room: RoomState, question: QuestionSnapshot): void => {
+  const revealDurationMs = Math.max(1, question.revealDurationMs ?? 1);
   room.status = "QUESTION_OPEN";
-  room.game.currentQuestion = question;
+  room.game.currentQuestion = {
+    ...question,
+    revealDurationMs,
+    revealedMs: clamp(question.revealedMs ?? 0, 0, revealDurationMs),
+    revealResumedAtServerMs: question.revealResumedAtServerMs ?? Date.now(),
+  };
+  room.game.autoNextQuestionAtServerMs = null;
   room.game.board.remainingQuestionIds = room.game.board.remainingQuestionIds.filter((id) => id !== question.id);
 
   for (const player of Object.values(room.players)) {
@@ -35,6 +48,7 @@ export const lockBuzzerWinner = (room: RoomState, winnerUserId: string): void =>
   room.game.buzzer.state = "LOCKED";
   room.game.buzzer.winnerUserId = winnerUserId;
   room.game.answering.activeUserId = winnerUserId;
+  room.game.answering.draftAnswerText = "";
 
   const timeLimit = room.game.currentQuestion?.answerTimeLimitMs ?? room.settings.defaultAnswerTimeLimitMs;
   room.game.answering.deadlineServerMs = Date.now() + timeLimit;
@@ -45,13 +59,26 @@ export type WrongAnswerOutcome = "REOPENED" | "CLOSED";
 export const markWrongAnswer = (
   room: RoomState,
   userId: string,
-  options?: { reopenWindowMs?: number },
+  options?: { fallbackReopenWindowMs?: number },
 ): WrongAnswerOutcome => {
+  const nowMs = Date.now();
   if (!room.game.buzzer.lockedOutUserIds.includes(userId)) {
     room.game.buzzer.lockedOutUserIds.push(userId);
   }
   room.game.answering.activeUserId = null;
   room.game.answering.deadlineServerMs = null;
+  room.game.answering.draftAnswerText = "";
+
+  const pausedReadRemainingMs = Math.max(0, room.game.answering.pausedReadRemainingMs ?? 0);
+  const pausedCloseRemainingMs = Math.max(
+    0,
+    room.game.answering.pausedCloseRemainingMs ??
+      options?.fallbackReopenWindowMs ??
+      room.settings.buzzWindowMs ??
+      7_000,
+  );
+  room.game.answering.pausedReadRemainingMs = null;
+  room.game.answering.pausedCloseRemainingMs = null;
 
   const eligible = Object.values(room.players).some(
     (player) =>
@@ -61,15 +88,43 @@ export const markWrongAnswer = (
   );
 
   room.status = eligible ? "QUESTION_OPEN" : "QUESTION_CLOSED";
-  room.game.buzzer.state = eligible ? "OPEN" : "CLOSED";
+  room.game.buzzer.state = "CLOSED";
   room.game.buzzer.readStartedAtServerMs = null;
-  room.game.buzzer.readEndsAtServerMs = eligible ? Date.now() : null;
-  room.game.buzzer.openAtServerMs = eligible ? Date.now() : null;
-  room.game.buzzer.closeAtServerMs = eligible ? Date.now() + (options?.reopenWindowMs ?? 5_000) : null;
+  room.game.buzzer.readEndsAtServerMs = null;
+  room.game.buzzer.openAtServerMs = null;
+  room.game.buzzer.closeAtServerMs = null;
   room.game.buzzer.winnerUserId = null;
   room.game.buzzer.resolveAtServerMs = null;
   room.game.buzzer.attempts = [];
-  room.game.buzzer.openedAtServerMs = eligible ? Date.now() : null;
+  room.game.buzzer.openedAtServerMs = null;
+
+  if (eligible) {
+    const question = room.game.currentQuestion;
+    const revealDurationMs = Math.max(1, question?.revealDurationMs ?? 1);
+    const revealedMs = clamp(question?.revealedMs ?? revealDurationMs, 0, revealDurationMs);
+    const readRemainingMs = Math.max(
+      0,
+      Math.min(pausedReadRemainingMs, Math.max(0, revealDurationMs - revealedMs)),
+    );
+
+    if (question) {
+      question.revealedMs = revealedMs;
+      question.revealResumedAtServerMs = readRemainingMs > 0 ? nowMs : null;
+    }
+
+    const readEndsAtServerMs = readRemainingMs > 0 ? nowMs + readRemainingMs : nowMs;
+    const allowFalseStarts = room.settings.allowFalseStarts ?? true;
+    const openAtServerMs = allowFalseStarts ? readEndsAtServerMs : nowMs;
+    const closeAtServerMs = nowMs + pausedCloseRemainingMs;
+    const isOpenNow = openAtServerMs <= nowMs;
+
+    room.game.buzzer.readStartedAtServerMs = readRemainingMs > 0 ? nowMs : null;
+    room.game.buzzer.readEndsAtServerMs = readRemainingMs > 0 ? readEndsAtServerMs : nowMs;
+    room.game.buzzer.openAtServerMs = openAtServerMs;
+    room.game.buzzer.closeAtServerMs = closeAtServerMs;
+    room.game.buzzer.state = isOpenNow ? "OPEN" : "CLOSED";
+    room.game.buzzer.openedAtServerMs = isOpenNow ? nowMs : null;
+  }
 
   return eligible ? "REOPENED" : "CLOSED";
 };
@@ -80,6 +135,7 @@ export const closeQuestion = (room: RoomState): void => {
   }
 
   room.status = "QUESTION_CLOSED";
+  room.game.autoNextQuestionAtServerMs = null;
   room.game.buzzer.state = "CLOSED";
   room.game.buzzer.readStartedAtServerMs = null;
   room.game.buzzer.readEndsAtServerMs = null;
@@ -91,6 +147,9 @@ export const closeQuestion = (room: RoomState): void => {
   room.game.buzzer.attempts = [];
   room.game.answering.activeUserId = null;
   room.game.answering.deadlineServerMs = null;
+  room.game.answering.draftAnswerText = "";
+  room.game.answering.pausedReadRemainingMs = null;
+  room.game.answering.pausedCloseRemainingMs = null;
 };
 
 export const completeIfBoardFinished = (room: RoomState): void => {

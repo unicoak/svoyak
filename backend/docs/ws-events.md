@@ -14,6 +14,7 @@
 - `select_question`: `{ roomCode, questionId }`
 - `buzz_attempt`: `{ roomCode, questionId, pressClientMs, offsetMs, rttMs, sampleId }`
 - `answer_submitted`: `{ roomCode, questionId, answerText, submittedClientMs }`
+- `answer_draft`: `{ roomCode, questionId, answerText }` (fire-and-forget, no ack envelope)
 - `heartbeat`: `{ roomCode, clientNowMs }`
 
 All events use ack envelope:
@@ -39,6 +40,7 @@ or
 - `buzz_rejected`
 - `answer_result`
 - `question_closed`
+  - payload: `{ questionId, correctAnswerDisplay, correctAnswerComment, autoNextAtServerMs, scores }`
 - `host_migrated`
 - `player_presence`
 - `error`

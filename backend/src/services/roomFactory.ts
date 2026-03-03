@@ -22,7 +22,7 @@ export const defaultRoomSettings = (defaults: {
   maxPlayers: 6,
   disconnectGraceMs: 30_000,
   buzzResolveWindowMs: defaults.buzzResolveWindowMs,
-  buzzWindowMs: 5_000,
+  buzzWindowMs: 7_000,
   defaultAnswerTimeLimitMs: defaults.defaultAnswerTimeLimitMs,
   allowFalseStarts: true,
 });
@@ -85,6 +85,7 @@ export const createInitialRoomState = (input: CreateRoomStateInput): RoomState =
       playedQuestionIds: [],
     },
     currentQuestion: null,
+    autoNextQuestionAtServerMs: null,
     buzzer: {
       state: "CLOSED",
       readStartedAtServerMs: null,
@@ -100,6 +101,9 @@ export const createInitialRoomState = (input: CreateRoomStateInput): RoomState =
     answering: {
       activeUserId: null,
       deadlineServerMs: null,
+      draftAnswerText: "",
+      pausedReadRemainingMs: null,
+      pausedCloseRemainingMs: null,
     },
   },
   migration: {

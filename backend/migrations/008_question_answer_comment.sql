@@ -1,0 +1,6 @@
+BEGIN;
+
+ALTER TABLE questions
+  ADD COLUMN IF NOT EXISTS answer_comment TEXT NOT NULL DEFAULT '';
+
+COMMIT;

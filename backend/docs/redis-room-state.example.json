@@ -1,5 +1,5 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "version": 1,
   "roomId": "7f5e1c66-7f4f-4a7c-9f4b-4fd79cfdb1f8",
   "code": "AB12CD",
@@ -13,7 +13,9 @@
     "maxPlayers": 6,
     "disconnectGraceMs": 30000,
     "buzzResolveWindowMs": 80,
-    "defaultAnswerTimeLimitMs": 5000
+    "buzzWindowMs": 7000,
+    "defaultAnswerTimeLimitMs": 15000,
+    "allowFalseStarts": true
   },
   "players": {
     "4ef8d5f1-9c4f-4f8b-b3df-47d5f76c5f7c": {
@@ -43,6 +45,7 @@
       "playedQuestionIds": []
     },
     "currentQuestion": null,
+    "autoNextQuestionAtServerMs": null,
     "buzzer": {
       "state": "CLOSED",
       "openedAtServerMs": null,
@@ -53,7 +56,10 @@
     },
     "answering": {
       "activeUserId": null,
-      "deadlineServerMs": null
+      "deadlineServerMs": null,
+      "draftAnswerText": "",
+      "pausedReadRemainingMs": null,
+      "pausedCloseRemainingMs": null
     }
   },
   "migration": {

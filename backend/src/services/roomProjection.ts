@@ -25,6 +25,7 @@ export type PublicRoomState = Omit<RoomState, "players"> & {
 
 export const toPublicRoomState = (room: RoomState): PublicRoomState => {
   const cloned = structuredClone(room) as PublicRoomState;
+  cloned.game.answering.draftAnswerText = "";
 
   for (const [userId, player] of Object.entries(room.players)) {
     cloned.players[userId] = {
@@ -45,6 +46,7 @@ export const toPublicRoomState = (room: RoomState): PublicRoomState => {
     (cloned.status === "QUESTION_OPEN" || cloned.status === "ANSWERING")
   ) {
     cloned.game.currentQuestion.answerDisplay = "";
+    cloned.game.currentQuestion.answerComment = "";
   }
 
   return cloned;

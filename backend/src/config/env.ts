@@ -39,5 +39,5 @@ export const env = {
   redisUrl: process.env.REDIS_URL ?? "redis://localhost:6379",
   roomTtlSeconds: parseIntOrDefault(process.env.ROOM_TTL_SECONDS, 24 * 60 * 60),
   buzzResolveWindowMs: parseIntOrDefault(process.env.BUZZ_RESOLVE_WINDOW_MS, 80),
-  defaultAnswerTimeLimitMs: parseIntOrDefault(process.env.DEFAULT_ANSWER_TIME_LIMIT_MS, 5000),
+  defaultAnswerTimeLimitMs: parseIntOrDefault(process.env.DEFAULT_ANSWER_TIME_LIMIT_MS, 15000),
 };

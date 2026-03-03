@@ -11,6 +11,18 @@ import '../theme/app_theme.dart';
 
 enum _HomeStage { start, lobby, game }
 
+class _PhaseCountdown {
+  const _PhaseCountdown({
+    required this.title,
+    required this.secondsLeft,
+    required this.color,
+  });
+
+  final String title;
+  final int secondsLeft;
+  final Color color;
+}
+
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
 
@@ -19,14 +31,7 @@ class HomeScreen extends StatefulWidget {
 }
 
 class _HomeScreenState extends State<HomeScreen> {
-  static const Map<int, String> _kraftTopicsByRow = <int, String>{
-    1: 'ПРЯНОСТИ',
-    2: 'КРЫЛЬЯ',
-    3: 'НАЧИНАЕТСЯ С ПРИСТАВКИ',
-    4: 'МАТРИЧНАЯ -МИР-',
-    5: 'ИГРЫ',
-    6: 'КОРОЛЕВСКОЕ ГЕОГРАФИЧЕСКОЕ ОБЩЕСТВО',
-  };
+  static const int _answerWindowMs = 15000;
 
   final PlayerProfileStore _profileStore = PlayerProfileStore();
 
@@ -149,15 +154,23 @@ class _HomeScreenState extends State<HomeScreen> {
       return false;
     }
 
-    if (roomState.status != 'QUESTION_OPEN') {
-      return false;
+    if (roomState.status == 'QUESTION_OPEN') {
+      final bool hasRevealWindow = roomState.readStartedAtServerMs != null &&
+          roomState.readEndsAtServerMs != null;
+      final bool hasBuzzWindow = roomState.buzzOpenAtServerMs != null &&
+          roomState.buzzCloseAtServerMs != null;
+      return hasRevealWindow || hasBuzzWindow;
     }
 
-    final bool hasRevealWindow = roomState.readStartedAtServerMs != null &&
-        roomState.readEndsAtServerMs != null;
-    final bool hasBuzzWindow = roomState.buzzOpenAtServerMs != null &&
-        roomState.buzzCloseAtServerMs != null;
-    return hasRevealWindow || hasBuzzWindow;
+    if (roomState.status == 'ANSWERING') {
+      return roomState.answerDeadlineServerMs != null;
+    }
+
+    if (roomState.status == 'QUESTION_CLOSED') {
+      return roomState.autoNextQuestionAtServerMs != null;
+    }
+
+    return false;
   }
 
   void _syncClockTicker(GameController game) {
@@ -954,12 +967,12 @@ class _HomeScreenState extends State<HomeScreen> {
       child: Column(
         children: <Widget>[
           Expanded(
-            flex: 4,
+            flex: 7,
             child: _buildGameTopBoardCard(game, roomState),
           ),
           const SizedBox(height: 10),
           Expanded(
-            flex: 4,
+            flex: 2,
             child: _buildPlayersCard(game, roomState.players),
           ),
           const SizedBox(height: 10),
@@ -972,11 +985,19 @@ class _HomeScreenState extends State<HomeScreen> {
   Widget _buildGameTopBoardCard(GameController game, RoomStateView roomState) {
     final QuestionView? question = roomState.currentQuestion;
     final String topic = _topicLabel(question);
+    final String costLabel = _questionCostLabel(question);
     final int serverNowMs = _nowMs + game.offsetMs;
+    final int? buzzOpenAtMs = roomState.buzzOpenAtServerMs;
+    final bool canPressSignal = roomState.allowFalseStarts &&
+        roomState.status == 'QUESTION_OPEN' &&
+        buzzOpenAtMs != null &&
+        serverNowMs >= buzzOpenAtMs;
     final String phaseHint = _questionPhaseHint(roomState, serverNowMs);
+    final _PhaseCountdown? countdown = _phaseCountdown(roomState, serverNowMs);
     final bool shouldShowAnswer = roomState.status == 'QUESTION_CLOSED' &&
         question != null &&
         question.answerDisplay.trim().isNotEmpty;
+    final String answerComment = question?.answerComment.trim() ?? '';
 
     return _panel(
       padding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
@@ -989,12 +1010,17 @@ class _HomeScreenState extends State<HomeScreen> {
                 child: Text(
                   topic,
                   style: _headlineFont(
-                    size: 19,
+                    size: 20,
                     weight: FontWeight.w800,
                     letterSpacing: 0.2,
                   ),
                 ),
               ),
+              _statusPill(
+                costLabel,
+                const Color(0xFF7FD7FF),
+              ),
+              const SizedBox(width: 6),
               _statusPill(
                 _humanStatus(roomState.status),
                 _statusColor(roomState.status),
@@ -1025,7 +1051,9 @@ class _HomeScreenState extends State<HomeScreen> {
             ],
           ),
           const SizedBox(height: 4),
-          Row(
+          Wrap(
+            spacing: 8,
+            runSpacing: 6,
             children: <Widget>[
               _statusPill(
                 roomState.allowFalseStarts ? 'ФАЛЬСТАРТЫ ON' : 'ФАЛЬСТАРТЫ OFF',
@@ -1033,19 +1061,13 @@ class _HomeScreenState extends State<HomeScreen> {
                     ? AppPalette.warning
                     : const Color(0xFF8FA6FF),
               ),
-              const SizedBox(width: 8),
-              Expanded(
-                child: Text(
-                  phaseHint,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                        color: AppPalette.textMuted,
-                      ),
-                ),
-              ),
+              _statusPill(phaseHint, const Color(0xFF8DB8FF)),
             ],
           ),
+          if (countdown != null) ...<Widget>[
+            const SizedBox(height: 8),
+            _buildPhaseCountdownCard(countdown),
+          ],
           const SizedBox(height: 8),
           Expanded(
             child: Container(
@@ -1054,11 +1076,32 @@ class _HomeScreenState extends State<HomeScreen> {
               decoration: BoxDecoration(
                 borderRadius: BorderRadius.circular(14),
                 color: const Color(0x2236A3FF),
-                border: Border.all(color: AppPalette.border),
+                border: Border.all(
+                  color: canPressSignal
+                      ? const Color(0xFF4CFF9B)
+                      : AppPalette.border,
+                  width: canPressSignal ? 2 : 1,
+                ),
+                boxShadow: canPressSignal
+                    ? <BoxShadow>[
+                        BoxShadow(
+                          color:
+                              const Color(0xFF4CFF9B).withValues(alpha: 0.35),
+                          blurRadius: 16,
+                          spreadRadius: -6,
+                          offset: const Offset(0, 8),
+                        ),
+                      ]
+                    : null,
               ),
-              child: Align(
-                alignment: Alignment.topLeft,
-                child: _buildAnimatedPrompt(game, roomState, question),
+              child: Scrollbar(
+                child: SingleChildScrollView(
+                  physics: const BouncingScrollPhysics(),
+                  child: Align(
+                    alignment: Alignment.topLeft,
+                    child: _buildAnimatedPrompt(game, roomState, question),
+                  ),
+                ),
               ),
             ),
           ),
@@ -1073,11 +1116,13 @@ class _HomeScreenState extends State<HomeScreen> {
                 border: Border.all(color: const Color(0x9953DDB0)),
               ),
               child: Text(
-                'Правильный ответ: ${question.answerDisplay}',
-                maxLines: 2,
+                'Правильный ответ: ${question.answerDisplay}\n'
+                'Комментарий: ${answerComment.isEmpty ? '—' : answerComment}',
+                maxLines: 4,
                 overflow: TextOverflow.ellipsis,
                 style: Theme.of(context).textTheme.bodyMedium?.copyWith(
                       fontWeight: FontWeight.w700,
+                      height: 1.2,
                     ),
               ),
             ),
@@ -1094,24 +1139,125 @@ class _HomeScreenState extends State<HomeScreen> {
       return 'ТЕМА';
     }
 
-    if (question.roundNo == 1) {
-      final String? kraftTopic = _kraftTopicsByRow[question.boardRow];
-      if (kraftTopic != null) {
-        return kraftTopic;
-      }
-    }
-
     if (question.boardRow > 0) {
-      return 'ТЕМА ${question.boardRow}';
+      return 'ТЕМА ${question.boardRow} · ВОПРОС ${question.boardCol.clamp(1, 5)}';
     }
 
     return 'ТЕМА';
+  }
+
+  String _questionCostLabel(QuestionView? question) {
+    if (question == null) {
+      return 'Цена —';
+    }
+
+    final int normalizedPoints = question.boardCol.clamp(1, 5) * 10;
+    return 'Цена $normalizedPoints';
+  }
+
+  _PhaseCountdown? _phaseCountdown(
+    RoomStateView roomState,
+    int serverNowMs,
+  ) {
+    if (roomState.status == 'QUESTION_OPEN') {
+      final int? readEndsAtMs = roomState.readEndsAtServerMs;
+      if (readEndsAtMs != null && serverNowMs < readEndsAtMs) {
+        final int msLeft = (readEndsAtMs - serverNowMs).clamp(0, 60 * 1000);
+        return _PhaseCountdown(
+          title: 'ЧТЕНИЕ ВОПРОСА',
+          secondsLeft: _secondsLeftInt(msLeft),
+          color: const Color(0xFF8BB8FF),
+        );
+      }
+
+      final int? buzzCloseAtMs = roomState.buzzCloseAtServerMs;
+      if (buzzCloseAtMs != null && serverNowMs <= buzzCloseAtMs) {
+        final int msLeft = (buzzCloseAtMs - serverNowMs).clamp(0, 60 * 1000);
+        return _PhaseCountdown(
+          title: 'ВРЕМЯ НА НАЖАТИЕ',
+          secondsLeft: _secondsLeftInt(msLeft),
+          color: AppPalette.warning,
+        );
+      }
+    }
+
+    if (roomState.status == 'ANSWERING') {
+      final int? answerDeadlineMs = roomState.answerDeadlineServerMs;
+      if (answerDeadlineMs != null && serverNowMs <= answerDeadlineMs) {
+        final int msLeft = (answerDeadlineMs - serverNowMs).clamp(0, 60 * 1000);
+        return _PhaseCountdown(
+          title: 'ВРЕМЯ НА ВВОД ОТВЕТА',
+          secondsLeft: _secondsLeftInt(msLeft),
+          color: AppPalette.success,
+        );
+      }
+    }
+
+    if (roomState.status == 'QUESTION_CLOSED') {
+      final int? autoNextAtMs = roomState.autoNextQuestionAtServerMs;
+      if (autoNextAtMs != null && serverNowMs < autoNextAtMs) {
+        final int msLeft = (autoNextAtMs - serverNowMs).clamp(0, 60 * 1000);
+        return _PhaseCountdown(
+          title: 'СЛЕДУЮЩИЙ ВОПРОС',
+          secondsLeft: _secondsLeftInt(msLeft),
+          color: const Color(0xFF97B0FF),
+        );
+      }
+    }
+
+    return null;
+  }
+
+  Widget _buildPhaseCountdownCard(_PhaseCountdown countdown) {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(14),
+        color: countdown.color.withValues(alpha: 0.16),
+        border: Border.all(color: countdown.color.withValues(alpha: 0.85)),
+      ),
+      child: Row(
+        children: <Widget>[
+          Expanded(
+            child: Text(
+              countdown.title,
+              style: Theme.of(context).textTheme.labelLarge?.copyWith(
+                    color: countdown.color,
+                    fontWeight: FontWeight.w800,
+                    letterSpacing: 0.6,
+                  ),
+            ),
+          ),
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(12),
+              color: const Color(0x22000000),
+            ),
+            child: Text(
+              '${countdown.secondsLeft}',
+              style: _headlineFont(
+                size: 30,
+                weight: FontWeight.w900,
+                color: countdown.color,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
   }
 
   Widget _buildHostRoundControl(GameController game, RoomStateView roomState) {
     if (!game.isHost) {
       return const SizedBox.shrink();
     }
+
+    final int serverNowMs = _nowMs + game.offsetMs;
+    final int? autoNextAtMs = roomState.autoNextQuestionAtServerMs;
+    final bool waitingAutoNext =
+        autoNextAtMs != null && serverNowMs < autoNextAtMs;
 
     if (roomState.status == 'LOBBY') {
       return SizedBox(
@@ -1125,6 +1271,17 @@ class _HomeScreenState extends State<HomeScreen> {
 
     if (roomState.status == 'QUESTION_CLOSED' &&
         roomState.remainingQuestionIds.isNotEmpty) {
+      if (waitingAutoNext) {
+        final int msLeft = (autoNextAtMs - serverNowMs).clamp(0, 60 * 1000);
+        return SizedBox(
+          width: double.infinity,
+          child: FilledButton.tonal(
+            onPressed: null,
+            child: Text('Следующий вопрос через ${_secondsLeft(msLeft)} c'),
+          ),
+        );
+      }
+
       return SizedBox(
         width: double.infinity,
         child: FilledButton.tonal(
@@ -1142,6 +1299,8 @@ class _HomeScreenState extends State<HomeScreen> {
     final int serverNowMs = _nowMs + game.offsetMs;
     final int? buzzOpenAtMs = roomState.buzzOpenAtServerMs;
     final int? buzzCloseAtMs = roomState.buzzCloseAtServerMs;
+    final int? readEndMs = roomState.readEndsAtServerMs;
+    final int? answerDeadlineMs = roomState.answerDeadlineServerMs;
     final bool hasQuestion = roomState.currentQuestion != null;
     final bool inQuestionOpen =
         roomState.status == 'QUESTION_OPEN' && hasQuestion;
@@ -1154,31 +1313,45 @@ class _HomeScreenState extends State<HomeScreen> {
         serverNowMs <= buzzCloseAtMs;
     final bool beforeBuzzClose =
         inQuestionOpen && buzzCloseAtMs != null && serverNowMs <= buzzCloseAtMs;
+    final bool readingInProgress =
+        inQuestionOpen && readEndMs != null && serverNowMs < readEndMs;
     final bool selfCanBuzz = self?.canBuzz ?? false;
     final bool legacyWindowActive = beforeBuzzClose && buzzOpenAtMs == null;
 
     final bool buzzEnabled = !game.isBusy &&
         selfCanBuzz &&
         hasQuestion &&
-        (withinBuzzWindow ||
-            (inReading && roomState.allowFalseStarts) ||
-            legacyWindowActive);
+        (withinBuzzWindow || inReading || legacyWindowActive);
 
     final bool submitEnabled = !game.isBusy &&
         hasQuestion &&
         roomState.status == 'ANSWERING' &&
         roomState.activeAnswerUserId == game.selfUserId;
+    if (submitEnabled) {
+      game.updateAnswerDraft(_answerController.text);
+    }
+    final bool showAnswerProgress = roomState.status == 'ANSWERING' &&
+        answerDeadlineMs != null &&
+        serverNowMs <= answerDeadlineMs;
+    final int answerMsLeft = showAnswerProgress
+        ? (answerDeadlineMs - serverNowMs).clamp(0, _answerWindowMs)
+        : 0;
+    final double? answerProgress = showAnswerProgress
+        ? (answerMsLeft / _answerWindowMs).clamp(0, 1).toDouble()
+        : null;
 
     String buttonLabel = 'КНОПКА';
     String hint = 'Ждите начала вопроса';
     bool buttonWarn = false;
 
     if (roomState.status == 'ANSWERING') {
+      final String timeLabel =
+          showAnswerProgress ? ' ${_secondsLeft(answerMsLeft)}c' : '';
       if (roomState.activeAnswerUserId == game.selfUserId) {
-        buttonLabel = 'ОТВЕЧАЙ';
+        buttonLabel = 'ОТВЕЧАЙ$timeLabel';
         hint = 'Введи ответ в поле ниже';
       } else {
-        buttonLabel = 'ОТВЕЧАЕТ ИГРОК';
+        buttonLabel = 'ОТВЕЧАЕТ ИГРОК$timeLabel';
         hint = 'Кнопка временно недоступна';
       }
     } else if (inReading) {
@@ -1189,21 +1362,30 @@ class _HomeScreenState extends State<HomeScreen> {
             'До кнопки ${_secondsLeft(msLeft)} c. Раннее нажатие = блокировка на вопрос.';
         buttonWarn = true;
       } else {
-        buttonLabel = 'ЧТЕНИЕ...';
-        hint = 'До кнопки ${_secondsLeft(msLeft)} c';
+        buttonLabel = 'ЖМИ В ЛЮБОЙ МОМЕНТ';
+        hint = 'Можно нажимать уже во время чтения вопроса';
       }
     } else if (withinBuzzWindow) {
       final int msLeft = (buzzCloseAtMs - serverNowMs).clamp(0, 60 * 1000);
-      buttonLabel = 'ЖМИ!';
+      if (roomState.allowFalseStarts) {
+        buttonLabel = 'МОЖНО НАЖИМАТЬ';
+      } else {
+        buttonLabel = readingInProgress ? 'ЖМИ В ЛЮБОЙ МОМЕНТ' : 'ЖМИ!';
+      }
       hint = 'Окно кнопки: осталось ${_secondsLeft(msLeft)} c';
     } else if (!selfCanBuzz && inQuestionOpen) {
       buttonLabel = 'БЛОКИРОВКА';
       hint = 'Ты не можешь нажимать кнопку в этом вопросе';
     } else if (roomState.status == 'QUESTION_CLOSED') {
       buttonLabel = 'ОЖИДАНИЕ';
-      hint = roomState.remainingQuestionIds.isEmpty
-          ? 'Игра завершена'
-          : 'Ведущий открывает следующий вопрос';
+      final int? autoNextAtMs = roomState.autoNextQuestionAtServerMs;
+      if (roomState.remainingQuestionIds.isEmpty) {
+        hint = 'Игра завершена';
+      } else if (autoNextAtMs != null && serverNowMs < autoNextAtMs) {
+        hint = 'Показ ответа: ${_secondsLeft(autoNextAtMs - serverNowMs)} c';
+      } else {
+        hint = 'Ведущий открывает следующий вопрос';
+      }
     }
 
     return _panel(
@@ -1216,6 +1398,7 @@ class _HomeScreenState extends State<HomeScreen> {
             onTap: game.buzz,
             label: buttonLabel,
             warning: buttonWarn,
+            progress: answerProgress,
           ),
           const SizedBox(height: 10),
           Align(
@@ -1236,6 +1419,12 @@ class _HomeScreenState extends State<HomeScreen> {
                 child: TextField(
                   controller: _answerController,
                   enabled: submitEnabled,
+                  onChanged: (String value) {
+                    if (!submitEnabled) {
+                      return;
+                    }
+                    game.updateAnswerDraft(value);
+                  },
                   onSubmitted: (_) {
                     if (!submitEnabled) {
                       return;
@@ -1267,6 +1456,7 @@ class _HomeScreenState extends State<HomeScreen> {
     required VoidCallback onTap,
     required String label,
     bool warning = false,
+    double? progress,
   }) {
     final Color left = enabled
         ? (warning ? const Color(0xFFE2862F) : const Color(0xFF35D39A))
@@ -1274,6 +1464,7 @@ class _HomeScreenState extends State<HomeScreen> {
     final Color right = enabled
         ? (warning ? const Color(0xFFD74B4B) : const Color(0xFF2EC8FF))
         : const Color(0xFF2A355D);
+    final double? safeProgress = progress?.clamp(0, 1);
 
     return AnimatedOpacity(
       duration: const Duration(milliseconds: 180),
@@ -1299,27 +1490,52 @@ class _HomeScreenState extends State<HomeScreen> {
         ),
         child: Material(
           color: Colors.transparent,
-          child: InkWell(
-            borderRadius: BorderRadius.circular(18),
-            onTap: enabled ? onTap : null,
-            child: Padding(
-              padding: const EdgeInsets.symmetric(vertical: 14),
-              child: Row(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: <Widget>[
-                  const Icon(Icons.bolt_rounded, color: Colors.white),
-                  const SizedBox(width: 10),
-                  Text(
-                    label,
-                    style: _headlineFont(
-                      size: 20,
-                      weight: FontWeight.w800,
-                      letterSpacing: 0.7,
+          child: Stack(
+            children: <Widget>[
+              InkWell(
+                borderRadius: BorderRadius.circular(18),
+                onTap: enabled ? onTap : null,
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 14),
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: <Widget>[
+                      const Icon(Icons.bolt_rounded, color: Colors.white),
+                      const SizedBox(width: 10),
+                      Text(
+                        label,
+                        style: _headlineFont(
+                          size: 20,
+                          weight: FontWeight.w800,
+                          letterSpacing: 0.7,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+              if (safeProgress != null)
+                Positioned(
+                  left: 0,
+                  right: 0,
+                  bottom: 0,
+                  child: ClipRRect(
+                    borderRadius: const BorderRadius.vertical(
+                        bottom: Radius.circular(18)),
+                    child: Container(
+                      height: 6,
+                      color: const Color(0x29000000),
+                      child: FractionallySizedBox(
+                        widthFactor: safeProgress,
+                        alignment: Alignment.centerLeft,
+                        child: Container(
+                          color: const Color(0xCCFFFFFF),
+                        ),
+                      ),
                     ),
                   ),
-                ],
-              ),
-            ),
+                ),
+            ],
           ),
         ),
       ),
@@ -1328,6 +1544,11 @@ class _HomeScreenState extends State<HomeScreen> {
 
   String _questionPhaseHint(RoomStateView roomState, int serverNowMs) {
     if (roomState.status == 'QUESTION_OPEN') {
+      final int? readEndMs = roomState.readEndsAtServerMs;
+      if (readEndMs != null && serverNowMs < readEndMs) {
+        return 'Чтение вопроса: ${_secondsLeft(readEndMs - serverNowMs)} c';
+      }
+
       final int? openAtMs = roomState.buzzOpenAtServerMs;
       final int? closeAtMs = roomState.buzzCloseAtServerMs;
       if (openAtMs != null && serverNowMs < openAtMs) {
@@ -1340,10 +1561,18 @@ class _HomeScreenState extends State<HomeScreen> {
     }
 
     if (roomState.status == 'ANSWERING') {
+      final int? answerDeadlineMs = roomState.answerDeadlineServerMs;
+      if (answerDeadlineMs != null && serverNowMs <= answerDeadlineMs) {
+        return 'Ввод ответа: ${_secondsLeft(answerDeadlineMs - serverNowMs)} c';
+      }
       return 'Игрок отвечает';
     }
 
     if (roomState.status == 'QUESTION_CLOSED') {
+      final int? autoNextAtMs = roomState.autoNextQuestionAtServerMs;
+      if (autoNextAtMs != null && serverNowMs < autoNextAtMs) {
+        return 'Показ ответа и комментария: ${_secondsLeft(autoNextAtMs - serverNowMs)} c';
+      }
       return roomState.remainingQuestionIds.isEmpty
           ? 'Игра завершена'
           : 'Ожидание следующего вопроса';
@@ -1362,22 +1591,20 @@ class _HomeScreenState extends State<HomeScreen> {
     QuestionView? question,
   ) {
     final TextStyle baseStyle =
-        Theme.of(context).textTheme.titleMedium?.copyWith(
+        Theme.of(context).textTheme.titleLarge?.copyWith(
                   fontWeight: FontWeight.w700,
-                  height: 1.3,
+                  height: 1.35,
                 ) ??
             const TextStyle(
-              fontSize: 18,
+              fontSize: 20,
               fontWeight: FontWeight.w700,
-              height: 1.3,
+              height: 1.35,
               color: Colors.white,
             );
 
     if (question == null) {
       return Text(
         'Ожидание вопроса. Ведущий запускает игру и открывает следующий вопрос.',
-        maxLines: 7,
-        overflow: TextOverflow.ellipsis,
         style: baseStyle,
       );
     }
@@ -1391,14 +1618,14 @@ class _HomeScreenState extends State<HomeScreen> {
     }
 
     final int serverNowMs = _nowMs + game.offsetMs;
-    final int? readStartMs = roomState.readStartedAtServerMs;
-    final int? readEndMs = roomState.readEndsAtServerMs;
     int visibleChars = textLength;
 
-    if (roomState.status == 'QUESTION_OPEN' &&
-        readStartMs != null &&
+    final int? readStartMs = roomState.readStartedAtServerMs;
+    final int? readEndMs = roomState.readEndsAtServerMs;
+    if (readStartMs != null &&
         readEndMs != null &&
-        readEndMs > readStartMs) {
+        readEndMs > readStartMs &&
+        roomState.status == 'QUESTION_OPEN') {
       if (serverNowMs <= readStartMs) {
         visibleChars = 0;
       } else if (serverNowMs >= readEndMs) {
@@ -1408,13 +1635,24 @@ class _HomeScreenState extends State<HomeScreen> {
             (serverNowMs - readStartMs) / (readEndMs - readStartMs);
         visibleChars = (textLength * progress).floor().clamp(0, textLength);
       }
+    } else {
+      final int revealDurationMs =
+          question.revealDurationMs > 0 ? question.revealDurationMs : 1;
+      final int baseRevealedMs = question.revealedMs.clamp(0, revealDurationMs);
+      final int liveRevealedMs = question.revealResumedAtServerMs == null
+          ? 0
+          : (serverNowMs - question.revealResumedAtServerMs!)
+              .clamp(0, 60 * 1000);
+      final int effectiveRevealedMs =
+          (baseRevealedMs + liveRevealedMs).clamp(0, revealDurationMs);
+      visibleChars = ((textLength * effectiveRevealedMs) / revealDurationMs)
+          .floor()
+          .clamp(0, textLength);
     }
 
     if (visibleChars >= textLength) {
       return Text(
         question.prompt,
-        maxLines: 7,
-        overflow: TextOverflow.ellipsis,
         style: baseStyle,
       );
     }
@@ -1423,8 +1661,6 @@ class _HomeScreenState extends State<HomeScreen> {
     final String hidden = question.prompt.substring(visibleChars);
 
     return RichText(
-      maxLines: 7,
-      overflow: TextOverflow.ellipsis,
       text: TextSpan(
         children: <InlineSpan>[
           TextSpan(
@@ -1458,17 +1694,29 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   String _secondsLeft(int ms) {
-    final int secs = ((ms.clamp(0, 60 * 1000) + 999) / 1000).floor();
-    return secs.toString();
+    return _secondsLeftInt(ms).toString();
+  }
+
+  int _secondsLeftInt(int ms) {
+    return ((ms.clamp(0, 60 * 1000) + 999) / 1000).floor();
   }
 
   Widget _buildPlayersCard(GameController game, List<PlayerView> players) {
     return _panel(
+      padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: <Widget>[
-          _sectionTitle('Игроки и счёт', icon: Icons.groups_2_rounded),
-          const SizedBox(height: 10),
+          Row(
+            children: <Widget>[
+              Expanded(
+                child: _sectionTitle('Игроки и счёт',
+                    icon: Icons.groups_2_rounded),
+              ),
+              _statusPill('${players.length}', const Color(0xFF8DB8FF)),
+            ],
+          ),
+          const SizedBox(height: 6),
           Expanded(
             child: players.isEmpty
                 ? Center(
@@ -1479,36 +1727,13 @@ class _HomeScreenState extends State<HomeScreen> {
                           ),
                     ),
                   )
-                : LayoutBuilder(
-                    builder:
-                        (BuildContext context, BoxConstraints constraints) {
-                      const double spacing = 8;
-                      final int columns = players.length <= 4 ? 1 : 2;
-                      final int rows = (players.length / columns).ceil();
-                      final double availableHeight =
-                          constraints.maxHeight - spacing * (rows - 1);
-                      final double availableWidth =
-                          constraints.maxWidth - spacing * (columns - 1);
-                      final double tileHeight =
-                          (availableHeight > 1 ? availableHeight : 1) / rows;
-                      final double tileWidth =
-                          (availableWidth > 1 ? availableWidth : 1) / columns;
-                      final double aspectRatio = tileWidth / tileHeight;
-
-                      return GridView.builder(
-                        physics: const NeverScrollableScrollPhysics(),
-                        padding: EdgeInsets.zero,
-                        gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
-                          crossAxisCount: columns,
-                          crossAxisSpacing: spacing,
-                          mainAxisSpacing: spacing,
-                          childAspectRatio: aspectRatio,
-                        ),
-                        itemCount: players.length,
-                        itemBuilder: (BuildContext context, int index) {
-                          return _buildPlayerTile(game, index, players[index]);
-                        },
-                      );
+                : ListView.separated(
+                    padding: EdgeInsets.zero,
+                    physics: const ClampingScrollPhysics(),
+                    itemCount: players.length,
+                    separatorBuilder: (_, __) => const SizedBox(height: 6),
+                    itemBuilder: (BuildContext context, int index) {
+                      return _buildPlayerTile(game, index, players[index]);
                     },
                   ),
           ),
@@ -1519,11 +1744,13 @@ class _HomeScreenState extends State<HomeScreen> {
 
   Widget _buildPlayerTile(GameController game, int rank, PlayerView player) {
     final bool isMe = player.userId == game.selfUserId;
+    final Color scoreColor =
+        player.score >= 0 ? const Color(0xFF9BE8C8) : const Color(0xFFFF9B9B);
 
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
       decoration: BoxDecoration(
-        borderRadius: BorderRadius.circular(14),
+        borderRadius: BorderRadius.circular(11),
         color: isMe ? const Color(0x334A7BFF) : const Color(0x1AFFFFFF),
         border: Border.all(
           color: isMe ? const Color(0xAA4A7BFF) : AppPalette.border,
@@ -1531,38 +1758,34 @@ class _HomeScreenState extends State<HomeScreen> {
       ),
       child: Row(
         children: <Widget>[
-          Container(
-            width: 28,
-            height: 28,
-            alignment: Alignment.center,
-            decoration: BoxDecoration(
-              color: const Color(0x331E4FDB),
-              borderRadius: BorderRadius.circular(9),
-            ),
+          SizedBox(
+            width: 24,
             child: Text(
               '${rank + 1}',
-              style: Theme.of(context)
-                  .textTheme
-                  .labelMedium
-                  ?.copyWith(fontWeight: FontWeight.w700),
+              textAlign: TextAlign.center,
+              style: Theme.of(context).textTheme.labelMedium?.copyWith(
+                    fontWeight: FontWeight.w700,
+                    color: AppPalette.textMuted,
+                  ),
             ),
           ),
-          const SizedBox(width: 10),
+          const SizedBox(width: 8),
           Expanded(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisAlignment: MainAxisAlignment.center,
               children: <Widget>[
                 Text(
-                  '${player.name}${player.isHost ? ' • host' : ''}${isMe ? ' • you' : ''}',
+                  '${player.name}${player.isHost ? ' · host' : ''}${isMe ? ' · you' : ''}',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
                   style: Theme.of(context).textTheme.bodyMedium?.copyWith(
                         fontWeight: FontWeight.w700,
                       ),
                 ),
                 Text(
                   player.connected
-                      ? (player.canBuzz
-                          ? 'online · can buzz'
-                          : 'online · locked')
+                      ? (player.canBuzz ? 'online · ready' : 'online · locked')
                       : 'offline',
                   style: Theme.of(context).textTheme.bodySmall?.copyWith(
                         color: player.connected
@@ -1575,9 +1798,22 @@ class _HomeScreenState extends State<HomeScreen> {
               ],
             ),
           ),
-          Text(
-            '${player.score}',
-            style: _headlineFont(size: 17),
+          Container(
+            constraints: const BoxConstraints(minWidth: 58),
+            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+            alignment: Alignment.centerRight,
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(8),
+              color: const Color(0x1AFFFFFF),
+            ),
+            child: Text(
+              '${player.score}',
+              style: _headlineFont(
+                size: 18,
+                weight: FontWeight.w800,
+                color: scoreColor,
+              ),
+            ),
           ),
         ],
       ),

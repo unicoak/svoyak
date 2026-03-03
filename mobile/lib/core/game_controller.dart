@@ -36,6 +36,8 @@ class GameController extends ChangeNotifier {
   bool createRoomAllowFalseStarts = true;
   String? flashMessage;
   int _flashMessageVersion = 0;
+  String _lastDraftSent = '';
+  String? _lastDraftQuestionId;
 
   String? roomCode;
   String? selfUserId;
@@ -155,8 +157,13 @@ class GameController extends ChangeNotifier {
       statusMessage = 'Public rooms loaded';
       _appendLog('public rooms updated: ${publicRooms.length}');
     } catch (error) {
-      statusMessage = 'Public rooms refresh failed: $error';
-      _appendLog(statusMessage);
+      final String userMessage = _friendlyErrorMessage(
+        error,
+        fallbackPrefix: 'Public rooms refresh failed',
+      );
+      statusMessage = userMessage;
+      _appendLog('Public rooms refresh failed: $error');
+      _pushFlash(userMessage);
     } finally {
       isBusy = false;
       notifyListeners();
@@ -209,8 +216,13 @@ class GameController extends ChangeNotifier {
       statusMessage = 'Packages loaded';
       _appendLog('packages updated: ${availablePackages.length}');
     } catch (error) {
-      statusMessage = 'Packages refresh failed: $error';
-      _appendLog(statusMessage);
+      final String userMessage = _friendlyErrorMessage(
+        error,
+        fallbackPrefix: 'Packages refresh failed',
+      );
+      statusMessage = userMessage;
+      _appendLog('Packages refresh failed: $error');
+      _pushFlash(userMessage);
     } finally {
       isBusy = false;
       notifyListeners();
@@ -308,6 +320,33 @@ class GameController extends ChangeNotifier {
     }, errorPrefix: 'Submit answer failed');
   }
 
+  void updateAnswerDraft(String answerText) {
+    final code = roomCode;
+    final currentQuestionId = roomState?.currentQuestion?.id;
+    if (code == null || currentQuestionId == null || currentQuestionId.isEmpty) {
+      return;
+    }
+
+    final bool isMyAnsweringTurn = roomState?.status == 'ANSWERING' &&
+        roomState?.activeAnswerUserId == selfUserId;
+    if (!isMyAnsweringTurn) {
+      return;
+    }
+
+    final String normalized = answerText.trim();
+    if (_lastDraftQuestionId == currentQuestionId && _lastDraftSent == normalized) {
+      return;
+    }
+    _lastDraftQuestionId = currentQuestionId;
+    _lastDraftSent = normalized;
+
+    _socketService.emitAnswerDraft(
+      roomCode: code,
+      questionId: currentQuestionId,
+      answerText: normalized,
+    );
+  }
+
   Future<void> syncTime() async {
     if (!_socketService.isConnected) {
       return;
@@ -334,6 +373,8 @@ class GameController extends ChangeNotifier {
       await _socketService.leaveRoom(code);
       roomCode = null;
       roomState = null;
+      _lastDraftQuestionId = null;
+      _lastDraftSent = '';
       _stopRoomTelemetryLoops();
       _appendLog('leave_room sent');
     }, errorPrefix: 'Leave room failed');
@@ -480,12 +521,18 @@ class GameController extends ChangeNotifier {
           'state': roomStateRaw,
           'version': roomStateRaw['version'],
         });
+        _lastDraftQuestionId = null;
+        _lastDraftSent = '';
         _startRoomTelemetryLoops();
         unawaited(syncTime());
         _appendLog('Joined room: $roomCode');
         break;
       case 'room_state':
         roomState = RoomStateView.fromRoomStatePayload(payload);
+        if (roomState?.status != 'ANSWERING') {
+          _lastDraftQuestionId = null;
+          _lastDraftSent = '';
+        }
         break;
       case 'time_sync':
         final sampleId = payload['sampleId']?.toString();
@@ -520,11 +567,16 @@ class GameController extends ChangeNotifier {
           final bool isCorrect = payload['isCorrect'] == true;
           final bool timedOut = payload['timedOut'] == true;
           final int scoreDelta = (payload['scoreDelta'] as num?)?.toInt() ?? 0;
-          final String message = timedOut
-              ? 'Время вышло: $scoreDelta очков.'
-              : isCorrect
-                  ? 'Верно! +$scoreDelta'
-                  : 'Неверно: $scoreDelta';
+          final String message;
+          if (timedOut && isCorrect) {
+            message = 'Время вышло, введённый ответ засчитан: +$scoreDelta';
+          } else if (timedOut) {
+            message = 'Время вышло: $scoreDelta очков.';
+          } else if (isCorrect) {
+            message = 'Верно! +$scoreDelta';
+          } else {
+            message = 'Неверно: $scoreDelta';
+          }
           statusMessage = message;
           _pushFlash(message);
         }
@@ -591,6 +643,18 @@ class GameController extends ChangeNotifier {
   }) {
     if (error is SocketAckException) {
       return _friendlyAckCode(error.code);
+    }
+
+    if (error is SocketConnectionException) {
+      return 'Нет соединения с сервером. Проверь интернет и адрес backend.';
+    }
+
+    if (error is TimeoutException) {
+      return 'Сервер не отвечает. Попробуй ещё раз через пару секунд.';
+    }
+
+    if (error is StateError) {
+      return 'Проблема с подключением к серверу.';
     }
 
     return '$fallbackPrefix: $error';
