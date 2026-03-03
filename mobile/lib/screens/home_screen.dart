@@ -1127,6 +1127,46 @@ class _HomeScreenState extends State<HomeScreen> {
   Widget _buildGameAnswerBar(GameController game, RoomStateView roomState) {
     final PlayerView? self = _findSelfPlayer(game, roomState);
     final int serverNowMs = _nowMs + game.offsetMs;
+    final int? autoNextAtMs = roomState.autoNextQuestionAtServerMs;
+    final bool hostCanLaunchQuestion = game.isHost &&
+        ((roomState.status == 'LOBBY' &&
+                roomState.remainingQuestionIds.isNotEmpty) ||
+            (roomState.status == 'QUESTION_CLOSED' &&
+                roomState.remainingQuestionIds.isNotEmpty &&
+                (autoNextAtMs == null || serverNowMs >= autoNextAtMs)));
+
+    if (hostCanLaunchQuestion) {
+      return _panel(
+        padding: const EdgeInsets.fromLTRB(12, 12, 12, 12),
+        child: SizedBox(
+          width: double.infinity,
+          child: FilledButton(
+            onPressed: game.isBusy
+                ? null
+                : () async {
+                    if (roomState.status == 'LOBBY') {
+                      await game.startGame();
+                    }
+                    await game.selectNextQuestion();
+                  },
+            child: const Text('Запустить вопрос'),
+          ),
+        ),
+      );
+    }
+
+    if (roomState.status == 'LOBBY' && !game.isHost) {
+      return _panel(
+        padding: const EdgeInsets.fromLTRB(12, 12, 12, 12),
+        child: Text(
+          'Ожидаем ведущего: он запускает первый вопрос.',
+          style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                color: AppPalette.textMuted,
+              ),
+        ),
+      );
+    }
+
     final int? buzzOpenAtMs = roomState.buzzOpenAtServerMs;
     final int? buzzCloseAtMs = roomState.buzzCloseAtServerMs;
     final int? readEndMs = roomState.readEndsAtServerMs;
@@ -2021,5 +2061,4 @@ class _HomeScreenState extends State<HomeScreen> {
         return status;
     }
   }
-
 }
