@@ -13,6 +13,7 @@ interface CreateRoomStateInput {
   nowMs: number;
   settings: RoomSettings;
   questionIds: string[];
+  themeTitlesByRow: Record<string, string>;
 }
 
 export const defaultRoomSettings = (defaults: {
@@ -83,6 +84,7 @@ export const createInitialRoomState = (input: CreateRoomStateInput): RoomState =
     board: {
       remainingQuestionIds: input.questionIds,
       playedQuestionIds: [],
+      themeTitlesByRow: input.themeTitlesByRow,
     },
     currentQuestion: null,
     autoNextQuestionAtServerMs: null,

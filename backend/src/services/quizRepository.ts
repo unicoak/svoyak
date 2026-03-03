@@ -15,6 +15,7 @@ export class QuizRepository {
         SELECT
           id,
           title,
+          description,
           language_code AS "languageCode",
           is_published AS "isPublished"
         FROM quiz_packages
@@ -32,6 +33,7 @@ export class QuizRepository {
         SELECT
           id,
           title,
+          description,
           language_code AS "languageCode",
           is_published AS "isPublished"
         FROM quiz_packages
@@ -81,6 +83,7 @@ export class QuizRepository {
         SELECT
           p.id,
           p.title,
+          p.description,
           p.language_code AS "languageCode",
           p.is_published AS "isPublished",
           p.author_name AS "authorName",

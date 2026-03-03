@@ -11,18 +11,6 @@ import '../theme/app_theme.dart';
 
 enum _HomeStage { start, lobby, game }
 
-class _PhaseCountdown {
-  const _PhaseCountdown({
-    required this.title,
-    required this.secondsLeft,
-    required this.color,
-  });
-
-  final String title;
-  final int secondsLeft;
-  final Color color;
-}
-
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
 
@@ -984,7 +972,7 @@ class _HomeScreenState extends State<HomeScreen> {
 
   Widget _buildGameTopBoardCard(GameController game, RoomStateView roomState) {
     final QuestionView? question = roomState.currentQuestion;
-    final String topic = _topicLabel(question);
+    final String topic = _topicLabel(roomState, question);
     final String costLabel = _questionCostLabel(question);
     final int serverNowMs = _nowMs + game.offsetMs;
     final int? buzzOpenAtMs = roomState.buzzOpenAtServerMs;
@@ -992,8 +980,6 @@ class _HomeScreenState extends State<HomeScreen> {
         roomState.status == 'QUESTION_OPEN' &&
         buzzOpenAtMs != null &&
         serverNowMs >= buzzOpenAtMs;
-    final String phaseHint = _questionPhaseHint(roomState, serverNowMs);
-    final _PhaseCountdown? countdown = _phaseCountdown(roomState, serverNowMs);
     final bool shouldShowAnswer = roomState.status == 'QUESTION_CLOSED' &&
         question != null &&
         question.answerDisplay.trim().isNotEmpty;
@@ -1010,7 +996,7 @@ class _HomeScreenState extends State<HomeScreen> {
                 child: Text(
                   topic,
                   style: _headlineFont(
-                    size: 20,
+                    size: 16,
                     weight: FontWeight.w800,
                     letterSpacing: 0.2,
                   ),
@@ -1019,11 +1005,6 @@ class _HomeScreenState extends State<HomeScreen> {
               _statusPill(
                 costLabel,
                 const Color(0xFF7FD7FF),
-              ),
-              const SizedBox(width: 6),
-              _statusPill(
-                _humanStatus(roomState.status),
-                _statusColor(roomState.status),
               ),
               const SizedBox(width: 6),
               IconButton(
@@ -1043,36 +1024,18 @@ class _HomeScreenState extends State<HomeScreen> {
                       ),
                 ),
               ),
-              TextButton.icon(
+              IconButton(
+                tooltip: 'Копировать код',
                 onPressed: () => _copyRoomCode(roomState.roomCode),
-                icon: const Icon(Icons.copy_rounded, size: 16),
-                label: const Text('Копировать'),
+                icon: const Icon(Icons.copy_rounded, size: 18),
               ),
             ],
           ),
-          const SizedBox(height: 4),
-          Wrap(
-            spacing: 8,
-            runSpacing: 6,
-            children: <Widget>[
-              _statusPill(
-                roomState.allowFalseStarts ? 'ФАЛЬСТАРТЫ ON' : 'ФАЛЬСТАРТЫ OFF',
-                roomState.allowFalseStarts
-                    ? AppPalette.warning
-                    : const Color(0xFF8FA6FF),
-              ),
-              _statusPill(phaseHint, const Color(0xFF8DB8FF)),
-            ],
-          ),
-          if (countdown != null) ...<Widget>[
-            const SizedBox(height: 8),
-            _buildPhaseCountdownCard(countdown),
-          ],
-          const SizedBox(height: 8),
+          const SizedBox(height: 6),
           Expanded(
             child: Container(
               width: double.infinity,
-              padding: const EdgeInsets.all(12),
+              padding: const EdgeInsets.all(10),
               decoration: BoxDecoration(
                 borderRadius: BorderRadius.circular(14),
                 color: const Color(0x2236A3FF),
@@ -1105,9 +1068,10 @@ class _HomeScreenState extends State<HomeScreen> {
               ),
             ),
           ),
-          if (shouldShowAnswer) ...<Widget>[
-            const SizedBox(height: 8),
-            Container(
+          const SizedBox(height: 8),
+          SizedBox(
+            height: 62,
+            child: Container(
               width: double.infinity,
               padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
               decoration: BoxDecoration(
@@ -1116,31 +1080,36 @@ class _HomeScreenState extends State<HomeScreen> {
                 border: Border.all(color: const Color(0x9953DDB0)),
               ),
               child: Text(
-                'Правильный ответ: ${question.answerDisplay}\n'
-                'Комментарий: ${answerComment.isEmpty ? '—' : answerComment}',
-                maxLines: 4,
+                shouldShowAnswer
+                    ? 'Правильный ответ: ${question.answerDisplay}\n'
+                        'Комментарий: ${answerComment.isEmpty ? '—' : answerComment}'
+                    : 'Ответ и комментарий появятся после завершения вопроса.',
+                maxLines: 2,
                 overflow: TextOverflow.ellipsis,
-                style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                style: Theme.of(context).textTheme.bodySmall?.copyWith(
                       fontWeight: FontWeight.w700,
                       height: 1.2,
                     ),
               ),
             ),
-          ],
-          const SizedBox(height: 8),
-          _buildHostRoundControl(game, roomState),
+          ),
         ],
       ),
     );
   }
 
-  String _topicLabel(QuestionView? question) {
+  String _topicLabel(RoomStateView roomState, QuestionView? question) {
     if (question == null) {
       return 'ТЕМА';
     }
 
+    final String? themeTitle = roomState.themeTitlesByRow[question.boardRow];
+    if (themeTitle != null && themeTitle.trim().isNotEmpty) {
+      return themeTitle.trim();
+    }
+
     if (question.boardRow > 0) {
-      return 'ТЕМА ${question.boardRow} · ВОПРОС ${question.boardCol.clamp(1, 5)}';
+      return 'ТЕМА ${question.boardRow}';
     }
 
     return 'ТЕМА';
@@ -1153,145 +1122,6 @@ class _HomeScreenState extends State<HomeScreen> {
 
     final int normalizedPoints = question.boardCol.clamp(1, 5) * 10;
     return 'Цена $normalizedPoints';
-  }
-
-  _PhaseCountdown? _phaseCountdown(
-    RoomStateView roomState,
-    int serverNowMs,
-  ) {
-    if (roomState.status == 'QUESTION_OPEN') {
-      final int? readEndsAtMs = roomState.readEndsAtServerMs;
-      if (readEndsAtMs != null && serverNowMs < readEndsAtMs) {
-        final int msLeft = (readEndsAtMs - serverNowMs).clamp(0, 60 * 1000);
-        return _PhaseCountdown(
-          title: 'ЧТЕНИЕ ВОПРОСА',
-          secondsLeft: _secondsLeftInt(msLeft),
-          color: const Color(0xFF8BB8FF),
-        );
-      }
-
-      final int? buzzCloseAtMs = roomState.buzzCloseAtServerMs;
-      if (buzzCloseAtMs != null && serverNowMs <= buzzCloseAtMs) {
-        final int msLeft = (buzzCloseAtMs - serverNowMs).clamp(0, 60 * 1000);
-        return _PhaseCountdown(
-          title: 'ВРЕМЯ НА НАЖАТИЕ',
-          secondsLeft: _secondsLeftInt(msLeft),
-          color: AppPalette.warning,
-        );
-      }
-    }
-
-    if (roomState.status == 'ANSWERING') {
-      final int? answerDeadlineMs = roomState.answerDeadlineServerMs;
-      if (answerDeadlineMs != null && serverNowMs <= answerDeadlineMs) {
-        final int msLeft = (answerDeadlineMs - serverNowMs).clamp(0, 60 * 1000);
-        return _PhaseCountdown(
-          title: 'ВРЕМЯ НА ВВОД ОТВЕТА',
-          secondsLeft: _secondsLeftInt(msLeft),
-          color: AppPalette.success,
-        );
-      }
-    }
-
-    if (roomState.status == 'QUESTION_CLOSED') {
-      final int? autoNextAtMs = roomState.autoNextQuestionAtServerMs;
-      if (autoNextAtMs != null && serverNowMs < autoNextAtMs) {
-        final int msLeft = (autoNextAtMs - serverNowMs).clamp(0, 60 * 1000);
-        return _PhaseCountdown(
-          title: 'СЛЕДУЮЩИЙ ВОПРОС',
-          secondsLeft: _secondsLeftInt(msLeft),
-          color: const Color(0xFF97B0FF),
-        );
-      }
-    }
-
-    return null;
-  }
-
-  Widget _buildPhaseCountdownCard(_PhaseCountdown countdown) {
-    return Container(
-      width: double.infinity,
-      padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
-      decoration: BoxDecoration(
-        borderRadius: BorderRadius.circular(14),
-        color: countdown.color.withValues(alpha: 0.16),
-        border: Border.all(color: countdown.color.withValues(alpha: 0.85)),
-      ),
-      child: Row(
-        children: <Widget>[
-          Expanded(
-            child: Text(
-              countdown.title,
-              style: Theme.of(context).textTheme.labelLarge?.copyWith(
-                    color: countdown.color,
-                    fontWeight: FontWeight.w800,
-                    letterSpacing: 0.6,
-                  ),
-            ),
-          ),
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
-            decoration: BoxDecoration(
-              borderRadius: BorderRadius.circular(12),
-              color: const Color(0x22000000),
-            ),
-            child: Text(
-              '${countdown.secondsLeft}',
-              style: _headlineFont(
-                size: 30,
-                weight: FontWeight.w900,
-                color: countdown.color,
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildHostRoundControl(GameController game, RoomStateView roomState) {
-    if (!game.isHost) {
-      return const SizedBox.shrink();
-    }
-
-    final int serverNowMs = _nowMs + game.offsetMs;
-    final int? autoNextAtMs = roomState.autoNextQuestionAtServerMs;
-    final bool waitingAutoNext =
-        autoNextAtMs != null && serverNowMs < autoNextAtMs;
-
-    if (roomState.status == 'LOBBY') {
-      return SizedBox(
-        width: double.infinity,
-        child: FilledButton.tonal(
-          onPressed: game.isBusy ? null : game.startGame,
-          child: const Text('Начать игру'),
-        ),
-      );
-    }
-
-    if (roomState.status == 'QUESTION_CLOSED' &&
-        roomState.remainingQuestionIds.isNotEmpty) {
-      if (waitingAutoNext) {
-        final int msLeft = (autoNextAtMs - serverNowMs).clamp(0, 60 * 1000);
-        return SizedBox(
-          width: double.infinity,
-          child: FilledButton.tonal(
-            onPressed: null,
-            child: Text('Следующий вопрос через ${_secondsLeft(msLeft)} c'),
-          ),
-        );
-      }
-
-      return SizedBox(
-        width: double.infinity,
-        child: FilledButton.tonal(
-          onPressed: game.isBusy ? null : game.selectNextQuestion,
-          child: const Text('Открыть следующий вопрос'),
-        ),
-      );
-    }
-
-    return const SizedBox.shrink();
   }
 
   Widget _buildGameAnswerBar(GameController game, RoomStateView roomState) {
@@ -1542,63 +1372,20 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  String _questionPhaseHint(RoomStateView roomState, int serverNowMs) {
-    if (roomState.status == 'QUESTION_OPEN') {
-      final int? readEndMs = roomState.readEndsAtServerMs;
-      if (readEndMs != null && serverNowMs < readEndMs) {
-        return 'Чтение вопроса: ${_secondsLeft(readEndMs - serverNowMs)} c';
-      }
-
-      final int? openAtMs = roomState.buzzOpenAtServerMs;
-      final int? closeAtMs = roomState.buzzCloseAtServerMs;
-      if (openAtMs != null && serverNowMs < openAtMs) {
-        return 'Чтение вопроса: ${_secondsLeft(openAtMs - serverNowMs)} c';
-      }
-      if (closeAtMs != null && serverNowMs <= closeAtMs) {
-        return 'Окно кнопки: ${_secondsLeft(closeAtMs - serverNowMs)} c';
-      }
-      return 'Окно кнопки закрыто';
-    }
-
-    if (roomState.status == 'ANSWERING') {
-      final int? answerDeadlineMs = roomState.answerDeadlineServerMs;
-      if (answerDeadlineMs != null && serverNowMs <= answerDeadlineMs) {
-        return 'Ввод ответа: ${_secondsLeft(answerDeadlineMs - serverNowMs)} c';
-      }
-      return 'Игрок отвечает';
-    }
-
-    if (roomState.status == 'QUESTION_CLOSED') {
-      final int? autoNextAtMs = roomState.autoNextQuestionAtServerMs;
-      if (autoNextAtMs != null && serverNowMs < autoNextAtMs) {
-        return 'Показ ответа и комментария: ${_secondsLeft(autoNextAtMs - serverNowMs)} c';
-      }
-      return roomState.remainingQuestionIds.isEmpty
-          ? 'Игра завершена'
-          : 'Ожидание следующего вопроса';
-    }
-
-    if (roomState.status == 'LOBBY') {
-      return 'Ожидание старта игры';
-    }
-
-    return '';
-  }
-
   Widget _buildAnimatedPrompt(
     GameController game,
     RoomStateView roomState,
     QuestionView? question,
   ) {
     final TextStyle baseStyle =
-        Theme.of(context).textTheme.titleLarge?.copyWith(
+        Theme.of(context).textTheme.titleMedium?.copyWith(
                   fontWeight: FontWeight.w700,
-                  height: 1.35,
+                  height: 1.3,
                 ) ??
             const TextStyle(
-              fontSize: 20,
+              fontSize: 17,
               fontWeight: FontWeight.w700,
-              height: 1.35,
+              height: 1.3,
               color: Colors.white,
             );
 
@@ -1659,6 +1446,29 @@ class _HomeScreenState extends State<HomeScreen> {
 
     final String revealed = question.prompt.substring(0, visibleChars);
     final String hidden = question.prompt.substring(visibleChars);
+
+    final bool useTypewriterMode = !roomState.allowFalseStarts;
+    if (useTypewriterMode) {
+      final bool showCursor = (_nowMs ~/ 350).isEven;
+      return Text.rich(
+        TextSpan(
+          children: <InlineSpan>[
+            TextSpan(
+              text: revealed,
+              style: baseStyle.copyWith(color: Colors.white),
+            ),
+            if (showCursor)
+              TextSpan(
+                text: '▌',
+                style: baseStyle.copyWith(
+                  color: Colors.white.withValues(alpha: 0.9),
+                ),
+              ),
+          ],
+        ),
+        style: baseStyle,
+      );
+    }
 
     return RichText(
       text: TextSpan(
@@ -2212,20 +2022,4 @@ class _HomeScreenState extends State<HomeScreen> {
     }
   }
 
-  Color _statusColor(String status) {
-    switch (status) {
-      case 'LOBBY':
-        return AppPalette.accent;
-      case 'QUESTION_OPEN':
-        return AppPalette.warning;
-      case 'ANSWERING':
-        return AppPalette.success;
-      case 'QUESTION_CLOSED':
-        return const Color(0xFF8FA6FF);
-      case 'FINISHED':
-        return AppPalette.danger;
-      default:
-        return AppPalette.textMuted;
-    }
-  }
 }

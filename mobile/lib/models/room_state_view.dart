@@ -85,6 +85,7 @@ class RoomStateView {
     required this.players,
     required this.remainingQuestionIds,
     required this.playedQuestionIds,
+    required this.themeTitlesByRow,
     this.currentQuestion,
     this.activeAnswerUserId,
     this.answerDeadlineServerMs,
@@ -104,6 +105,7 @@ class RoomStateView {
   final List<PlayerView> players;
   final List<String> remainingQuestionIds;
   final List<String> playedQuestionIds;
+  final Map<int, String> themeTitlesByRow;
   final QuestionView? currentQuestion;
   final String? activeAnswerUserId;
   final int? answerDeadlineServerMs;
@@ -137,6 +139,22 @@ class RoomStateView {
     return <String>[];
   }
 
+  static Map<int, String> _asIntStringMap(dynamic raw) {
+    if (raw is! Map) {
+      return <int, String>{};
+    }
+
+    final Map<int, String> result = <int, String>{};
+    raw.forEach((dynamic key, dynamic value) {
+      final int? parsedKey = int.tryParse(key.toString());
+      final String parsedValue = value?.toString().trim() ?? '';
+      if (parsedKey != null && parsedValue.isNotEmpty) {
+        result[parsedKey] = parsedValue;
+      }
+    });
+    return result;
+  }
+
   factory RoomStateView.fromRoomStatePayload(Map<String, dynamic> payload) {
     final state = _asMap(payload['state']);
     final playersMap = _asMap(state['players']);
@@ -166,6 +184,7 @@ class RoomStateView {
       players: players,
       remainingQuestionIds: _asStringList(board['remainingQuestionIds']),
       playedQuestionIds: _asStringList(board['playedQuestionIds']),
+      themeTitlesByRow: _asIntStringMap(board['themeTitlesByRow']),
       currentQuestion: currentQuestion,
       activeAnswerUserId: answering['activeUserId']?.toString(),
       answerDeadlineServerMs: (answering['deadlineServerMs'] as num?)?.toInt(),

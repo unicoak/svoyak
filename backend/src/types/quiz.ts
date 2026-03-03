@@ -3,6 +3,7 @@ import { AcceptedAnswer, QuestionSnapshot } from "./room.js";
 export interface QuizPackageSummary {
   id: string;
   title: string;
+  description: string;
   languageCode: string;
   isPublished: boolean;
 }

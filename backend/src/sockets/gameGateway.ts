@@ -268,6 +268,11 @@ export class GameGateway {
         nowMs,
         settings: mergeRoomSettings(this.settingsDefaults, payload.settings),
         questionIds: structure.orderedQuestionIds,
+        themeTitlesByRow: this.resolveThemeTitlesByRow(
+          questions,
+          resolvedPackage.id,
+          resolvedPackage.description,
+        ),
       });
 
       await this.roomStore.save(room);
@@ -1978,6 +1983,65 @@ export class GameGateway {
   private computeQuestionRevealDurationMs(prompt: string): number {
     const estimatedMs = prompt.trim().length * QUESTION_REVEAL_PER_CHAR_MS;
     return Math.max(QUESTION_REVEAL_MIN_MS, Math.min(QUESTION_REVEAL_MAX_MS, estimatedMs));
+  }
+
+  private parseThemeTitlesFromPackageDescription(description: string): string[] {
+    const marker = /темы?\s*:\s*/i;
+    const markerMatch = marker.exec(description);
+    if (!markerMatch) {
+      return [];
+    }
+
+    const rawTail = description.slice(markerMatch.index + markerMatch[0].length);
+    const mainPart = rawTail
+      .split(/\.\s|\n/u)
+      .map((part) => part.trim())
+      .find((part) => part.length > 0) ?? "";
+
+    return mainPart
+      .split(";")
+      .map((part) => part.trim())
+      .filter((part) => part.length > 0);
+  }
+
+  private fallbackThemeTitlesByPackageId(packageId: string): Record<string, string> {
+    if (packageId === "88888888-8888-8888-8888-000000000002") {
+      return {
+        "1": "ПРЯНОСТИ",
+        "2": "КРЫЛЬЯ",
+        "3": "НАЧИНАЕТСЯ С ПРИСТАВКИ",
+        "4": "МАТРИЧНАЯ -МИР-",
+        "5": "ИГРЫ",
+        "6": "КОРОЛЕВСКОЕ ГЕОГРАФИЧЕСКОЕ ОБЩЕСТВО",
+      };
+    }
+
+    return {};
+  }
+
+  private resolveThemeTitlesByRow(
+    questions: QuizQuestionRow[],
+    packageId: string,
+    packageDescription: string,
+  ): Record<string, string> {
+    const rows = Array.from(new Set(questions.map((question) => question.boardRow))).sort((a, b) => a - b);
+    const parsedTitles = this.parseThemeTitlesFromPackageDescription(packageDescription);
+    const fallbackTitles = this.fallbackThemeTitlesByPackageId(packageId);
+    const titlesByRow: Record<string, string> = {};
+
+    for (let index = 0; index < rows.length; index += 1) {
+      const row = rows[index];
+      const key = String(row);
+      const parsed = parsedTitles[index]?.trim();
+      const fallback = fallbackTitles[key]?.trim();
+      titlesByRow[key] = parsed && parsed.length > 0
+        ? parsed
+        : fallback && fallback.length > 0
+          ? fallback
+          : `Тема ${row}`;
+    }
+
+    return titlesByRow;
   }
 
   private validatePackageStructure(questions: QuizQuestionRow[]): PackageStructureValidation {

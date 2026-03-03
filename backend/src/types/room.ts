@@ -74,6 +74,7 @@ export interface GameState {
   board: {
     remainingQuestionIds: string[];
     playedQuestionIds: string[];
+    themeTitlesByRow: Record<string, string>;
   };
   currentQuestion: QuestionSnapshot | null;
   autoNextQuestionAtServerMs: number | null;
