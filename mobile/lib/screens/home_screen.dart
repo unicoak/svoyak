@@ -99,6 +99,14 @@ class _HomeScreenState extends State<HomeScreen> {
 
     _syncClockTicker(game);
 
+    final RoomStateView? roomState = game.roomState;
+    final bool shouldClearAnswerInput = roomState == null ||
+        roomState.status != 'ANSWERING' ||
+        roomState.activeAnswerUserId != game.selfUserId;
+    if (shouldClearAnswerInput && _answerController.text.isNotEmpty) {
+      _answerController.clear();
+    }
+
     if (game.flashMessage != null &&
         game.flashMessageVersion > _lastSeenFlashVersion) {
       _lastSeenFlashVersion = game.flashMessageVersion;
@@ -171,7 +179,7 @@ class _HomeScreenState extends State<HomeScreen> {
       return;
     }
 
-    _clockTicker = Timer.periodic(const Duration(milliseconds: 220), (_) {
+    _clockTicker = Timer.periodic(const Duration(milliseconds: 45), (_) {
       if (!mounted || _stage != _HomeStage.game) {
         return;
       }
@@ -1409,6 +1417,14 @@ class _HomeScreenState extends State<HomeScreen> {
       );
     }
 
+    if (roomState.status == 'QUESTION_CLOSED' ||
+        roomState.status == 'FINISHED') {
+      return Text(
+        question.prompt,
+        style: baseStyle,
+      );
+    }
+
     final int serverNowMs = _nowMs + game.offsetMs;
     int visibleChars = textLength;
 
@@ -1462,13 +1478,19 @@ class _HomeScreenState extends State<HomeScreen> {
               text: revealed,
               style: baseStyle.copyWith(color: Colors.white),
             ),
-            if (showCursor)
+            if (showCursor && visibleChars < textLength)
               TextSpan(
                 text: '▌',
                 style: baseStyle.copyWith(
                   color: Colors.white.withValues(alpha: 0.9),
                 ),
               ),
+            TextSpan(
+              text: hidden,
+              style: baseStyle.copyWith(
+                color: Colors.transparent,
+              ),
+            ),
           ],
         ),
         style: baseStyle,
