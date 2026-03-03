@@ -405,6 +405,7 @@ export class GameGateway {
           atMs: Date.now(),
         });
 
+        this.restoreTimersForRoomState(payload.roomCode, result.room);
         this.emitRoomState(result.room);
         ack?.(ok({ roomCode: result.room.code, reconnectToken: result.reconnectToken, selfUserId: result.userId }));
       } catch (error) {
@@ -1055,7 +1056,7 @@ export class GameGateway {
       }
 
       try {
-        await this.roomStore.withRoomLock(parsed.data.roomCode, async (lockedRoom) => {
+        const outcome = await this.roomStore.withRoomLock(parsed.data.roomCode, async (lockedRoom) => {
           const player = lockedRoom.players[socket.data.userId];
           if (!player) {
             throw new Error("PLAYER_NOT_IN_ROOM");
@@ -1065,9 +1066,31 @@ export class GameGateway {
           player.connected = true;
           player.socketId = socket.id;
 
-          return lockedRoom;
+          const timedOutQuestion = this.closeOverdueQuestionIfNeeded(lockedRoom);
+          return { room: lockedRoom, timedOutQuestion };
         });
 
+        if (outcome.timedOutQuestion) {
+          this.clearQuestionWindowTimer(parsed.data.roomCode);
+          this.clearBuzzerFinalizationTimer(parsed.data.roomCode);
+          this.io.to(parsed.data.roomCode).emit("question_closed", {
+            questionId: outcome.timedOutQuestion.questionId,
+            correctAnswerDisplay: outcome.timedOutQuestion.correctAnswerDisplay,
+            correctAnswerComment: outcome.timedOutQuestion.correctAnswerComment,
+            autoNextAtServerMs: outcome.timedOutQuestion.autoNextAtServerMs,
+            scores: this.extractScores(outcome.room),
+          });
+
+          if (outcome.timedOutQuestion.autoNextAtServerMs) {
+            this.scheduleAutoNextQuestion(parsed.data.roomCode, outcome.timedOutQuestion.autoNextAtServerMs);
+          } else {
+            this.clearAutoNextQuestionTimer(parsed.data.roomCode);
+          }
+        } else {
+          this.restoreTimersForRoomState(parsed.data.roomCode, outcome.room);
+        }
+
+        this.emitRoomState(outcome.room);
         ack?.(ok({ now: Date.now() }));
       } catch (error) {
         ack?.(failure("HEARTBEAT_FAILED", "Unable to process heartbeat."));
@@ -1309,6 +1332,67 @@ export class GameGateway {
     }, timeoutMs);
 
     this.autoNextQuestionTimers.set(roomCode, timer);
+  }
+
+  private restoreTimersForRoomState(roomCode: string, room: RoomState): void {
+    if (room.status === "QUESTION_OPEN") {
+      if (room.game.buzzer.attempts.length > 0 && room.game.buzzer.resolveAtServerMs) {
+        this.scheduleBuzzerFinalization(roomCode, room.game.buzzer.resolveAtServerMs);
+      } else {
+        this.scheduleQuestionWindowForOpenState(roomCode, room);
+      }
+      return;
+    }
+
+    if (room.status === "ANSWERING") {
+      if (room.game.answering.deadlineServerMs) {
+        this.scheduleAnswerDeadline(roomCode, room.game.answering.deadlineServerMs);
+      }
+      return;
+    }
+
+    if (room.status === "QUESTION_CLOSED") {
+      if (room.game.autoNextQuestionAtServerMs) {
+        this.scheduleAutoNextQuestion(roomCode, room.game.autoNextQuestionAtServerMs);
+      }
+      return;
+    }
+  }
+
+  private closeOverdueQuestionIfNeeded(room: RoomState): null | {
+    questionId: string;
+    correctAnswerDisplay: string;
+    correctAnswerComment: string;
+    autoNextAtServerMs: number | null;
+  } {
+    if (room.status !== "QUESTION_OPEN") {
+      return null;
+    }
+
+    if (room.game.buzzer.attempts.length > 0) {
+      return null;
+    }
+
+    const closeAtServerMs = room.game.buzzer.closeAtServerMs;
+    if (!closeAtServerMs || Date.now() < closeAtServerMs) {
+      return null;
+    }
+
+    const question = room.game.currentQuestion;
+    if (!question) {
+      return null;
+    }
+
+    closeQuestion(room);
+    completeIfBoardFinished(room);
+    const autoNextAtServerMs = this.assignAutoNextQuestion(room);
+
+    return {
+      questionId: question.id,
+      correctAnswerDisplay: question.answerDisplay,
+      correctAnswerComment: question.answerComment,
+      autoNextAtServerMs,
+    };
   }
 
   private assignAutoNextQuestion(room: RoomState): number | null {
