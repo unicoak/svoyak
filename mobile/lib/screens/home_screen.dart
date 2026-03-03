@@ -25,8 +25,6 @@ class _HomeScreenState extends State<HomeScreen> {
 
   final TextEditingController _registrationNicknameController =
       TextEditingController();
-  final TextEditingController _packageSearchController =
-      TextEditingController();
   final TextEditingController _roomCodeController = TextEditingController();
   final TextEditingController _answerController = TextEditingController();
 
@@ -126,7 +124,6 @@ class _HomeScreenState extends State<HomeScreen> {
     _stopClockTicker();
     _disposeController();
     _registrationNicknameController.dispose();
-    _packageSearchController.dispose();
     _roomCodeController.dispose();
     _answerController.dispose();
     super.dispose();
@@ -418,7 +415,7 @@ class _HomeScreenState extends State<HomeScreen> {
         final bool wide = constraints.maxWidth > 980;
 
         return SingleChildScrollView(
-          padding: const EdgeInsets.fromLTRB(16, 14, 16, 20),
+          padding: const EdgeInsets.fromLTRB(14, 10, 14, 14),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: <Widget>[
@@ -441,7 +438,7 @@ class _HomeScreenState extends State<HomeScreen> {
                           Text(
                             'Игровое лобби',
                             style: _headlineFont(
-                              size: 24,
+                              size: 21,
                               weight: FontWeight.w800,
                             ),
                           ),
@@ -468,7 +465,7 @@ class _HomeScreenState extends State<HomeScreen> {
                   ],
                 ),
               ),
-              const SizedBox(height: 12),
+              const SizedBox(height: 10),
               if (wide)
                 Row(
                   crossAxisAlignment: CrossAxisAlignment.start,
@@ -478,12 +475,12 @@ class _HomeScreenState extends State<HomeScreen> {
                       child: Column(
                         children: <Widget>[
                           _buildCreateRoomCard(game),
-                          const SizedBox(height: 12),
+                          const SizedBox(height: 10),
                           _buildJoinByCodeCard(game),
                         ],
                       ),
                     ),
-                    const SizedBox(width: 12),
+                    const SizedBox(width: 10),
                     Expanded(
                       flex: 6,
                       child: _buildPublicRoomsCard(game),
@@ -494,9 +491,9 @@ class _HomeScreenState extends State<HomeScreen> {
                 Column(
                   children: <Widget>[
                     _buildCreateRoomCard(game),
-                    const SizedBox(height: 12),
+                    const SizedBox(height: 10),
                     _buildPublicRoomsCard(game),
-                    const SizedBox(height: 12),
+                    const SizedBox(height: 10),
                     _buildJoinByCodeCard(game),
                   ],
                 ),
@@ -513,26 +510,12 @@ class _HomeScreenState extends State<HomeScreen> {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: <Widget>[
           _sectionTitle('Создать комнату', icon: Icons.add_home_work_rounded),
-          const SizedBox(height: 10),
-          TextField(
-            controller: _packageSearchController,
-            textCapitalization: TextCapitalization.sentences,
-            decoration: InputDecoration(
-              labelText: 'Поиск пакета (название/автор)',
-              suffixIcon: IconButton(
-                tooltip: 'Найти',
-                onPressed: game.isBusy ? null : () => _refreshPackages(game),
-                icon: const Icon(Icons.search_rounded),
-              ),
-            ),
-            onSubmitted: (_) => _refreshPackages(game),
-          ),
-          const SizedBox(height: 10),
+          const SizedBox(height: 8),
           _buildDifficultySelector(game),
-          const SizedBox(height: 10),
+          const SizedBox(height: 8),
           Container(
             width: double.infinity,
-            constraints: const BoxConstraints(minHeight: 96, maxHeight: 210),
+            constraints: const BoxConstraints(minHeight: 84, maxHeight: 180),
             padding: const EdgeInsets.all(8),
             decoration: BoxDecoration(
               borderRadius: BorderRadius.circular(14),
@@ -545,7 +528,7 @@ class _HomeScreenState extends State<HomeScreen> {
                       mainAxisSize: MainAxisSize.min,
                       children: <Widget>[
                         Text(
-                          'Пакеты не найдены. Попробуй изменить запрос или фильтр.',
+                          'Пакеты не найдены. Попробуй изменить фильтр.',
                           textAlign: TextAlign.center,
                           style:
                               Theme.of(context).textTheme.bodySmall?.copyWith(
@@ -646,14 +629,14 @@ class _HomeScreenState extends State<HomeScreen> {
                   ),
             ),
           ],
-          const SizedBox(height: 12),
+          const SizedBox(height: 10),
           Text(
             'Тип комнаты',
             style: Theme.of(context).textTheme.bodySmall?.copyWith(
                   color: AppPalette.textMuted,
                 ),
           ),
-          const SizedBox(height: 8),
+          const SizedBox(height: 6),
           Wrap(
             spacing: 8,
             runSpacing: 8,
@@ -682,14 +665,14 @@ class _HomeScreenState extends State<HomeScreen> {
               ),
             ],
           ),
-          const SizedBox(height: 12),
+          const SizedBox(height: 10),
           Text(
             'Фальстарты',
             style: Theme.of(context).textTheme.bodySmall?.copyWith(
                   color: AppPalette.textMuted,
                 ),
           ),
-          const SizedBox(height: 8),
+          const SizedBox(height: 6),
           Wrap(
             spacing: 8,
             runSpacing: 8,
@@ -718,7 +701,7 @@ class _HomeScreenState extends State<HomeScreen> {
               ),
             ],
           ),
-          const SizedBox(height: 12),
+          const SizedBox(height: 10),
           SizedBox(
             width: double.infinity,
             child: FilledButton(
@@ -743,37 +726,33 @@ class _HomeScreenState extends State<HomeScreen> {
                 color: AppPalette.textMuted,
               ),
         ),
-        const SizedBox(height: 8),
+        const SizedBox(height: 6),
         Wrap(
-          spacing: 8,
-          runSpacing: 8,
+          spacing: 6,
+          runSpacing: 6,
           children: <Widget>[
             _buildDifficultyTile(
               game: game,
               value: null,
               title: 'Любая',
-              subtitle: 'Без фильтра',
               icon: Icons.all_inclusive_rounded,
             ),
             _buildDifficultyTile(
               game: game,
               value: 1,
               title: 'Легкая',
-              subtitle: 'Разминка',
               icon: Icons.eco_rounded,
             ),
             _buildDifficultyTile(
               game: game,
               value: 2,
               title: 'Средняя',
-              subtitle: 'Баланс',
               icon: Icons.flare_rounded,
             ),
             _buildDifficultyTile(
               game: game,
               value: 3,
               title: 'Сложная',
-              subtitle: 'Хардкор',
               icon: Icons.local_fire_department_rounded,
             ),
           ],
@@ -786,7 +765,6 @@ class _HomeScreenState extends State<HomeScreen> {
     required GameController game,
     required int? value,
     required String title,
-    required String subtitle,
     required IconData icon,
   }) {
     final bool selected = _packageDifficultyFilter == value;
@@ -795,7 +773,7 @@ class _HomeScreenState extends State<HomeScreen> {
         selected ? const Color(0x334A7BFF) : const Color(0x1AFFFFFF);
 
     return InkWell(
-      borderRadius: BorderRadius.circular(12),
+      borderRadius: BorderRadius.circular(10),
       onTap: game.isBusy
           ? null
           : () {
@@ -806,10 +784,10 @@ class _HomeScreenState extends State<HomeScreen> {
             },
       child: AnimatedContainer(
         duration: const Duration(milliseconds: 180),
-        width: 132,
-        padding: const EdgeInsets.fromLTRB(10, 9, 10, 9),
+        width: 104,
+        padding: const EdgeInsets.fromLTRB(8, 7, 8, 7),
         decoration: BoxDecoration(
-          borderRadius: BorderRadius.circular(12),
+          borderRadius: BorderRadius.circular(10),
           border: Border.all(color: borderColor),
           color: bgColor,
         ),
@@ -817,31 +795,18 @@ class _HomeScreenState extends State<HomeScreen> {
           children: <Widget>[
             Icon(
               icon,
-              size: 18,
+              size: 15,
               color: selected ? AppPalette.accent : AppPalette.textMuted,
             ),
-            const SizedBox(width: 8),
+            const SizedBox(width: 6),
             Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: <Widget>[
-                  Text(
-                    title,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: Theme.of(context).textTheme.labelLarge?.copyWith(
-                          fontWeight: FontWeight.w700,
-                        ),
-                  ),
-                  Text(
-                    subtitle,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                          color: AppPalette.textMuted,
-                        ),
-                  ),
-                ],
+              child: Text(
+                title,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: Theme.of(context).textTheme.labelMedium?.copyWith(
+                      fontWeight: FontWeight.w700,
+                    ),
               ),
             ),
           ],
@@ -1927,7 +1892,6 @@ class _HomeScreenState extends State<HomeScreen> {
     setState(() {
       _profile = null;
       _stage = _HomeStage.start;
-      _packageSearchController.clear();
       _packageDifficultyFilter = null;
       _roomCodeController.clear();
       _answerController.clear();
@@ -1944,7 +1908,7 @@ class _HomeScreenState extends State<HomeScreen> {
     await game.ensureConnected(profile.nickname);
     await game.refreshPublicRooms();
     await game.refreshPackages(
-      query: _packageSearchController.text.trim(),
+      query: null,
       difficulty: _packageDifficultyFilter,
     );
 
@@ -1962,7 +1926,7 @@ class _HomeScreenState extends State<HomeScreen> {
 
   Future<void> _refreshPackages(GameController game) async {
     await game.refreshPackages(
-      query: _packageSearchController.text.trim(),
+      query: null,
       difficulty: _packageDifficultyFilter,
     );
   }
@@ -1970,7 +1934,6 @@ class _HomeScreenState extends State<HomeScreen> {
   Future<void> _resetPackageFilters(GameController game) async {
     setState(() {
       _packageDifficultyFilter = null;
-      _packageSearchController.clear();
     });
     await _refreshPackages(game);
   }
